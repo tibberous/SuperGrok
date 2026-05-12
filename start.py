@@ -30,6 +30,7 @@ APP_NAME = "SuperGrok Bridge"
 DEFAULT_GROK_URL = "https://grok.com/"
 DEFAULT_CHATGPT_URL = "https://chatgpt.com/"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/app"
+DEFAULT_CLAUDE_URL = "https://claude.ai/new"
 DEFAULT_URL = DEFAULT_GROK_URL
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -70,7 +71,8 @@ SOURCE_SIGNATURE_GLOBS = (
 CHATGPT_TARGET_ALIASES = {"chatgpt", "chatgtp", "gtp", "gpt", "openai"}
 GROK_TARGET_ALIASES = {"grok", "supergrok", "xai"}
 GEMINI_TARGET_ALIASES = {"gemini", "gem", "gem-bridge", "gembridge", "google", "googleai", "bard"}
-ALL_CHAT_TARGET_ALIASES = CHATGPT_TARGET_ALIASES | GROK_TARGET_ALIASES | GEMINI_TARGET_ALIASES
+CLAUDE_TARGET_ALIASES = {"claude", "anthropic", "claudeai", "claude-bridge", "claudebridge", "cl"}
+ALL_CHAT_TARGET_ALIASES = CHATGPT_TARGET_ALIASES | GROK_TARGET_ALIASES | GEMINI_TARGET_ALIASES | CLAUDE_TARGET_ALIASES
 CHATGPT_CLI_FLAG_ALIASES = {
     "--chatgpt", "--chatgtp", "--gpt", "--gtp",
     "-chatgpt", "-chatgtp", "-gpt", "-gtp",
@@ -81,7 +83,12 @@ GEMINI_CLI_FLAG_ALIASES = {
     "-gemini", "-gem", "-bard",
     "/gemini", "/gem", "/bard",
 }
-CHAT_CLI_FLAG_ALIASES = {"--chat", "-chat", "/chat"} | CHATGPT_CLI_FLAG_ALIASES | GEMINI_CLI_FLAG_ALIASES
+CLAUDE_CLI_FLAG_ALIASES = {
+    "--claude", "--anthropic",
+    "-claude", "-anthropic",
+    "/claude", "/anthropic",
+}
+CHAT_CLI_FLAG_ALIASES = {"--chat", "-chat", "/chat"} | CHATGPT_CLI_FLAG_ALIASES | GEMINI_CLI_FLAG_ALIASES | CLAUDE_CLI_FLAG_ALIASES
 
 
 def normalizeChatTarget(value: object = "") -> str:
@@ -92,6 +99,8 @@ def normalizeChatTarget(value: object = "") -> str:
         return "grok"
     if target in GEMINI_TARGET_ALIASES:
         return "gemini"
+    if target in CLAUDE_TARGET_ALIASES:
+        return "claude"
     return target or "grok"
 
 
@@ -101,6 +110,8 @@ def defaultUrlForChatTarget(target: object = "") -> str:
         return DEFAULT_CHATGPT_URL
     if t == "gemini":
         return DEFAULT_GEMINI_URL
+    if t == "claude":
+        return DEFAULT_CLAUDE_URL
     return DEFAULT_GROK_URL
 
 
@@ -111,6 +122,8 @@ def urlLooksLikeTarget(url: object, target: object = "") -> bool:
         return "chatgpt.com" in text or "chat.openai.com" in text
     if wanted == "gemini":
         return "gemini.google.com" in text or "bard.google.com" in text
+    if wanted == "claude":
+        return "claude.ai" in text
     return "grok.com" in text or "x.ai" in text
 DEBUG_LOG = ROOT / "debug.log"
 SESSION_LOG = ROOT / "session.log"
@@ -750,10 +763,11 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--swallowed", "--swallowed-exceptions", action="store_true", help="Run only the swallowed exceptions detector and exit.")
     parser.add_argument("--manual", "--man", action="store_true", help="Print usage/manual with detector commands and exit.")
     parser.add_argument("--url", default=DEFAULT_URL, help="URL to load in the browser pane. Defaults to Grok, or ChatGPT when --chatgpt/--chatgtp is used.")
-    parser.add_argument("--target", choices=["grok", "chatgpt", "gemini"], default="", help="Browser target for --serve-bridge. Usually inferred from --chat/--chatgpt/--gemini or --url.")
+    parser.add_argument("--target", choices=["grok", "chatgpt", "gemini", "claude"], default="", help="Browser target for --serve-bridge. Usually inferred from --chat/--chatgpt/--gemini/--claude or --url.")
     parser.add_argument("--chat", nargs="*", default=None, help="Send a command-line chat request. Examples: --chat \"hello\", --chat --debug \"hello\", --chat grok \"hello\", --chat chatgpt \"hello\", or --chat grok deployment \"hello\".")
     parser.add_argument("--chatgpt", "--chatgtp", "--gpt", "--gtp", dest="chatgpt", nargs="*", default=None, help="Send a command-line chat request through ChatGPT at chatgpt.com. With no message, opens the visible ChatGPT bridge so you can log in and persist cookies. Aliases keep --chatgtp, --gpt, and --gtp working.")
     parser.add_argument("--gemini", "--gem", "--bard", dest="gemini", nargs="*", default=None, help="Send a command-line chat request through Gemini (gemini.google.com). With no message, opens the visible Gemini bridge so you can log in.")
+    parser.add_argument("--claude", "--anthropic", dest="claude", nargs="*", default=None, help="Send a command-line chat request through Claude (claude.ai). With no message, opens the visible Claude bridge so you can log in.")
     parser.add_argument("--attach", action="append", default=[], help="Attach an input file to a --chat request. May be repeated. Text files inlined; binary/image/PDF sent as base64. Replaces the old --file-as-attachment usage.")
     parser.add_argument("--file", nargs="?", const="<dialog>", default=None, help="Save the chat response to a file. With a path (--file out.txt), writes directly. Bare --file pops a Qt Save-As dialog. Use --attach for input files.")
     parser.add_argument("--serve-bridge", "--bridge-service", action="store_true", help="Run the resident local Grok bridge command service so Grok stays warm/logged in.")
@@ -795,6 +809,10 @@ def geminiFlagPresent(argv: list[str] | None) -> bool:
     return any(str(token or "").strip().lower() in GEMINI_CLI_FLAG_ALIASES for token in list(argv or []))
 
 
+def claudeFlagPresent(argv: list[str] | None) -> bool:
+    return any(str(token or "").strip().lower() in CLAUDE_CLI_FLAG_ALIASES for token in list(argv or []))
+
+
 def activeChatArgName(args: argparse.Namespace, argv: list[str] | None = None) -> str:
     # If --chat is present, unknown free text after another option belongs to
     # --chat, even when a provider alias like --gpt/--gtp is also present.
@@ -805,6 +823,8 @@ def activeChatArgName(args: argparse.Namespace, argv: list[str] | None = None) -
         return "chatgpt"
     if getattr(args, "gemini", None) is not None:
         return "gemini"
+    if getattr(args, "claude", None) is not None:
+        return "claude"
     return "chat"
 
 
@@ -900,6 +920,37 @@ def forceGeminiChatParts(parts: list[str] | None) -> list[str]:
     return ["gemini", *values]
 
 
+def claudeBridgeLoginRequested(args: argparse.Namespace) -> bool:
+    """Like chatGptBridgeLoginRequested but for --claude with no message."""
+    if getattr(args, "chat", None) is not None:
+        return False
+    values = getattr(args, "claude", None)
+    if values is None:
+        return False
+    return not any(str(item or "").strip() for item in list(values or []))
+
+
+def configureClaudeLoginBridgeArgs(args: argparse.Namespace) -> None:
+    args.chat = None
+    args.claude = []
+    args.chat_target = "claude"
+    args.target = "claude"
+    args.url = DEFAULT_CLAUDE_URL
+    args.serve_bridge = True
+    args.show_bridge = True
+    args.offscreen = False
+
+
+def forceClaudeChatParts(parts: list[str] | None) -> list[str]:
+    values = [str(item) for item in list(parts or []) if str(item or "").strip()]
+    if not values:
+        return ["claude"]
+    first = values[0].strip().lower().replace("_", "-")
+    if first in ALL_CHAT_TARGET_ALIASES:
+        return ["claude", *values[1:]]
+    return ["claude", *values]
+
+
 def _urlEffectivelyDefault(args: argparse.Namespace) -> bool:
     """A url is 'effectively unset' if it's empty or still the bare grok default."""
     value = str(getattr(args, "url", "") or "").strip()
@@ -912,6 +963,8 @@ def _inferTargetFromUrl(args: argparse.Namespace) -> str:
         return "chatgpt"
     if urlLooksLikeTarget(url, "gemini"):
         return "gemini"
+    if urlLooksLikeTarget(url, "claude"):
+        return "claude"
     return "grok"
 
 
@@ -927,6 +980,8 @@ def normalizeTargetUrlArgs(args: argparse.Namespace) -> None:
         args.url = DEFAULT_CHATGPT_URL
     elif target == "gemini" and _urlEffectivelyDefault(args):
         args.url = DEFAULT_GEMINI_URL
+    elif target == "claude" and _urlEffectivelyDefault(args):
+        args.url = DEFAULT_CLAUDE_URL
     elif target == "grok" and not str(getattr(args, "url", "") or "").strip():
         args.url = DEFAULT_GROK_URL
 
@@ -934,14 +989,19 @@ def normalizeTargetUrlArgs(args: argparse.Namespace) -> None:
 def normalizeChatModeArgs(args: argparse.Namespace) -> None:
     chatgpt_alias_requested = bool(getattr(args, "chatgpt_alias_requested", False) or getattr(args, "chatgpt", None) is not None)
     gemini_alias_requested = bool(getattr(args, "gemini_alias_requested", False) or getattr(args, "gemini", None) is not None)
+    claude_alias_requested = bool(getattr(args, "claude_alias_requested", False) or getattr(args, "claude", None) is not None)
     if getattr(args, "chat", None) is not None and chatgpt_alias_requested:
         args.chat = forceChatGptChatParts(getattr(args, "chat", []) or [])
     elif getattr(args, "chat", None) is not None and gemini_alias_requested:
         args.chat = forceGeminiChatParts(getattr(args, "chat", []) or [])
+    elif getattr(args, "chat", None) is not None and claude_alias_requested:
+        args.chat = forceClaudeChatParts(getattr(args, "chat", []) or [])
     elif getattr(args, "chatgpt", None) is not None:
         args.chat = forceChatGptChatParts(getattr(args, "chatgpt", []) or [])
     elif getattr(args, "gemini", None) is not None:
         args.chat = forceGeminiChatParts(getattr(args, "gemini", []) or [])
+    elif getattr(args, "claude", None) is not None:
+        args.chat = forceClaudeChatParts(getattr(args, "claude", []) or [])
     if getattr(args, "chat", None) is None:
         return
     parsed = parseChatArgs(getattr(args, "chat", []) or [])
@@ -951,6 +1011,8 @@ def normalizeChatModeArgs(args: argparse.Namespace) -> None:
         args.url = DEFAULT_CHATGPT_URL
     elif target == "gemini" and _urlEffectivelyDefault(args):
         args.url = DEFAULT_GEMINI_URL
+    elif target == "claude" and _urlEffectivelyDefault(args):
+        args.url = DEFAULT_CLAUDE_URL
     elif target == "grok" and not str(getattr(args, "url", "") or "").strip():
         args.url = DEFAULT_GROK_URL
 
@@ -1516,6 +1578,7 @@ def chatProviderLabelLocal(target: str) -> str:
     t = normalizeChatTarget(target)
     if t == "chatgpt": return "ChatGPT"
     if t == "gemini":  return "Gemini"
+    if t == "claude":  return "Claude"
     return "Grok"
 
 
@@ -1603,6 +1666,9 @@ def runChatCommand(args: argparse.Namespace) -> int:
             elif target_for_hint == "gemini":
                 print("[HINT] Run once visibly with: python start.py --gemini", file=sys.stderr, flush=True)
                 print("[HINT] Log into Google in the bridge window, leave it running, then use: python start.py --gemini \"message\"", file=sys.stderr, flush=True)
+            elif target_for_hint == "claude":
+                print("[HINT] Run once visibly with: python start.py --claude", file=sys.stderr, flush=True)
+                print("[HINT] Log into Anthropic in the bridge window, leave it running, then use: python start.py --claude \"message\"", file=sys.stderr, flush=True)
             else:
                 print("[HINT] Run once visibly with: python start.py --serve-bridge --show-bridge --target grok", file=sys.stderr, flush=True)
                 print("[HINT] After logging into Grok, use: python start.py --chat grok \"message\" --offscreen", file=sys.stderr, flush=True)
@@ -1707,13 +1773,17 @@ def main(argv: list[str] | None = None) -> int:
     args, unknown = parser.parse_known_args(argv)
     args.chatgpt_alias_requested = chatGptFlagPresent(argv)
     args.gemini_alias_requested = geminiFlagPresent(argv)
+    args.claude_alias_requested = claudeFlagPresent(argv)
     applyChatUnknownTail(args, unknown, argv)
     chatgpt_login_bridge = chatGptBridgeLoginRequested(args)
     gemini_login_bridge = geminiBridgeLoginRequested(args)
+    claude_login_bridge = claudeBridgeLoginRequested(args)
     if chatgpt_login_bridge:
         configureChatGptLoginBridgeArgs(args)
     elif gemini_login_bridge:
         configureGeminiLoginBridgeArgs(args)
+    elif claude_login_bridge:
+        configureClaudeLoginBridgeArgs(args)
     else:
         normalizeChatModeArgs(args)
     normalizeTargetUrlArgs(args)

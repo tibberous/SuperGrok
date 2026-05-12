@@ -102,6 +102,7 @@ SOURCE_SIGNATURE_GLOBS = (
 CHATGPT_TARGET_ALIASES = {"chatgpt", "chatgtp", "gtp", "gpt", "openai"}
 GROK_TARGET_ALIASES = {"grok", "supergrok", "xai"}
 GEMINI_TARGET_ALIASES = {"gemini", "gem", "gem-bridge", "gembridge", "google", "googleai", "bard"}
+CLAUDE_TARGET_ALIASES = {"claude", "anthropic", "claudeai", "claude-bridge", "claudebridge", "cl"}
 
 
 def normalizeChatTarget(value: object = "") -> str:
@@ -112,6 +113,8 @@ def normalizeChatTarget(value: object = "") -> str:
         return "grok"
     if target in GEMINI_TARGET_ALIASES:
         return "gemini"
+    if target in CLAUDE_TARGET_ALIASES:
+        return "claude"
     return target or "grok"
 
 
@@ -121,6 +124,8 @@ def chatTargetFromUrl(url: object = "") -> str:
         return "chatgpt"
     if "gemini.google.com" in text or "bard.google.com" in text:
         return "gemini"
+    if "claude.ai" in text:
+        return "claude"
     return "grok"
 
 
@@ -130,6 +135,8 @@ def chatProviderLabel(target: object = "") -> str:
         return "ChatGPT"
     if t == "gemini":
         return "Gemini"
+    if t == "claude":
+        return "Claude"
     return "Grok"
 
 
@@ -139,6 +146,8 @@ def chatProviderHomeUrl(target: object = "") -> str:
         return "https://chatgpt.com/"
     if t == "gemini":
         return "https://gemini.google.com/app"
+    if t == "claude":
+        return "https://claude.ai/new"
     return "https://grok.com/"
 
 
@@ -2742,6 +2751,14 @@ def buildGrokDomSendScript(message: str, sendId: str, *, maxTicks: int = 300, st
       'textarea#prompt-textarea',
       'div#prompt-textarea[contenteditable="true"]'
     ];
+    /* Claude (claude.ai) uses a ProseMirror editor in the composer panel.
+       data-testid="chat-input" + ProseMirror is the most stable combo today;
+       expect refinement after first round-trip. */
+    const claudeSelectors = [
+      'div[data-testid="chat-input"] div.ProseMirror[contenteditable="true"]',
+      'fieldset div.ProseMirror[contenteditable="true"]',
+      'div.ProseMirror[contenteditable="true"]'
+    ];
     const generic = [
       '[data-testid="composer"] [contenteditable="true"]',
       'form [contenteditable="true"]',
@@ -2754,6 +2771,7 @@ def buildGrokDomSendScript(message: str, sendId: str, *, maxTicks: int = 300, st
     let selectors;
     if (__target === 'gemini') selectors = geminiSelectors.concat(generic);
     else if (__target === 'chatgpt') selectors = chatgptSelectors.concat(generic);
+    else if (__target === 'claude') selectors = claudeSelectors.concat(generic);
     else selectors = chatgptSelectors.concat(generic);
     const rows = __queryAll(selectors, document);
     return rows.length ? rows[0] : null;
@@ -3105,6 +3123,23 @@ def buildGrokDomSendScript(message: str, sendId: str, *, maxTicks: int = 300, st
         '.response-container-content .markdown',
         'message-content[data-test-id*="response" i]',
         '.markdown.markdown-main-panel'
+      ]);
+      return out;
+    }}
+    if (__target === 'claude') {{
+      /* Claude (claude.ai) — Claude wraps assistant turns in elements that carry
+         the "font-claude-message" or "font-claude-response" class, and Claude's
+         own copy buttons live inside [data-testid="action-bar"]. Whitebox: the
+         font-* classes have been stable through several DOM refactors; the
+         data-testid surface is newer. */
+      collect([
+        '[data-testid="message"] .font-claude-message',
+        '.font-claude-response',
+        '.font-claude-message',
+        '[data-testid*="assistant" i] .markdown',
+        '[data-test-render-count] .font-claude-message',
+        'div.font-claude-message .grid-cols-1',
+        '[data-is-streaming]'
       ]);
       return out;
     }}
@@ -3750,8 +3785,8 @@ class BridgeCommandServer(QObject):
             return
         if action == "chat":
             target = normalizeChatTarget(request.get("target") or getattr(getattr(self.window, "config", None), "target", "grok"))
-            if target not in {"grok", "chatgpt", "gemini"}:
-                self.respond(socket, {"ok": False, "error": f"unsupported target {target!r}; expected grok, chatgpt, or gemini"})
+            if target not in {"grok", "chatgpt", "gemini", "claude"}:
+                self.respond(socket, {"ok": False, "error": f"unsupported target {target!r}; expected grok, chatgpt, gemini, or claude"})
                 return
             message = str(request.get("message") or "")
             attachments = request.get("attachments") if isinstance(request.get("attachments"), list) else []
