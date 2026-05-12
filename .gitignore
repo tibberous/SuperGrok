@@ -6,6 +6,15 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# Local secrets / per-machine config — NEVER commit
+config.ini
+config.local.ini
+secrets.ini
+*.pem
+*.key
+.token
+.pat
 build/
 dist/
 *.spec

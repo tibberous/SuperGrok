@@ -1,0 +1,30 @@
+; SuperGrok Bridge — example local configuration
+; ---------------------------------------------------------------------------
+; Copy this file to `config.ini` and fill in your own values.
+; `config.ini` is gitignored; this template (`.example`) is safe to commit.
+; ---------------------------------------------------------------------------
+
+[author]
+name = Your Name
+email = you@example.com
+phone =
+consulting_blurb =
+
+[github]
+username =
+; Personal access token used only for local automation (e.g., `gh` auth fallback).
+; Generate at https://github.com/settings/tokens — never share this value.
+pat =
+
+[bridge]
+; Override the persistent QtWebEngine profile root.
+; Blank = %USERPROFILE%\.supergrok\profiles\<provider>\
+profile_dir =
+; Default TCP port for the resident bridge command service.
+bridge_port = 8767
+; Default subprocess TTL (seconds) before the watchdog reaps a ToolCall child.
+process_ttl = 30
+
+[ui]
+; Top-level color theme for the bridge chrome. Either "dark" or "light".
+theme = dark

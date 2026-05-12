@@ -1,8 +1,34 @@
-# SuperGrok Bridge Desktop
+# SuperGrok Bridge
 
-A tiny PySide6 / Qt WebEngine shell for talking to the web version of Grok/SuperGrok through a real visible browser session.
+**One desktop window for every chat AI. CLI for headless prompts. Real logged-in sessions, no API keys.**
 
-This project is intentionally built around your normal logged-in browser pane. It does not bypass login, CAPTCHA, subscription checks, rate limits, or access controls.
+SuperGrok Bridge is a PySide6 + Qt WebEngine shell that hosts the web versions of **Grok**, **ChatGPT**, **Gemini**, and **Claude** inside a single split-pane desktop window with a persistent per-provider cookie profile. From the command line you can fire a prompt at any of them and get the answer back on stdout — using your own logged-in session, not a paid API.
+
+> This project is intentionally built around your normal logged-in browser session. It does **not** bypass login, CAPTCHA, subscription checks, rate limits, or any access controls. You log in once through the visible bridge window; your cookies persist; the CLI reuses them.
+
+## Highlights
+
+- 🤖 **Four providers in one shell** — Grok, ChatGPT (incl. `--gpt`/`--gtp` aliases), Gemini, Claude.
+- 💬 **CLI chat** — `python start.py --chat "hello"` returns the answer to stdout. Attach files with `--attach`.
+- 🧠 **Resident bridge service** — `--serve-bridge` keeps the QtWebEngine warm and logged-in for instant CLI responses.
+- 🎨 **Polished UI** — provider-aware toolbar/title, dark theme, visible resizable splitter handles, Prism-highlighted **View Source** with one-click plain fallback.
+- 🛠️ **Built-in DevTools** — Chromium DevTools dock per pane, plus remote debugging on `http://127.0.0.1:9222`.
+- 🪟 **Offscreen modes** — render-but-invisible Chromium surface on Windows; Xvfb/Xdummy/Xpra on Linux.
+- 🧹 **Lifecycle-safe** — PID-tracked subprocesses, TTL watchdog, no orphan Chromium children.
+
+## Author & contact
+
+**Trenton Tompkins** — [trentontompkins@gmail.com](mailto:trentontompkins@gmail.com) — `724-431-5207` — [github.com/tibberous](https://github.com/tibberous)
+
+> 📞 **Need help on your next project? Call me at 724-431-5207 for a free consultation!**
+
+*Codex by Claude Opus 4.7 and ChatGPT 5.5.*
+
+## Local config
+
+Per-machine secrets and overrides live in `config.ini` (gitignored). Copy `config.ini.example` to `config.ini` and fill in any values you need (GitHub PAT for automation, bridge port, profile dir override, etc.). The repo ships only `config.ini.example`; your real `config.ini` never gets committed.
+
+---
 
 ## Run
 

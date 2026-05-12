@@ -1,3 +1,19 @@
+# ============================================================================
+#  SuperGrok Bridge — Qt application
+#  ---------------------------------------------------------------------------
+#  Main split-pane bridge window: debug column | chat column | live web pane.
+#  Hosts grok.com / chatgpt.com / gemini.google.com / claude.ai inside Qt
+#  WebEngine with a persistent per-provider cookie profile.
+#
+#  Author : Trenton Tompkins  <trentontompkins@gmail.com>
+#  Phone  : 724-431-5207
+#  GitHub : https://github.com/tibberous/SuperGrok
+#
+#  Need help on your next project?
+#  Call me at 724-431-5207 for a free consultation!
+#
+#  Codex by Claude Opus 4.7 and ChatGPT 5.5.
+# ============================================================================
 from __future__ import annotations
 
 import builtins
@@ -39,6 +55,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QToolBar,
     QVBoxLayout,
@@ -756,24 +773,49 @@ def navigationUrl(text: str) -> QUrl:
     return QUrl.fromUserInput(f"https://grok.com/?q={value}")
 
 
-class SourceDialog(QDialog):
-    """Reliable source viewer.
+SOURCE_DIALOG_DARK_THEME_CSS = """
+  html, body { margin:0; min-height:100%; background:#1a1d23; color:#e2e8f0; font-family:Consolas, "Cascadia Mono", "Fira Code", monospace; font-size:13px; }
+  pre[class*="language-"] { margin:0; padding:14px 18px; background:#1a1d23 !important; white-space:pre-wrap; overflow-wrap:anywhere; }
+  code[class*="language-"], pre[class*="language-"] { color:#e2e8f0 !important; text-shadow:none !important; font-family:inherit; }
+  .token.comment, .token.prolog, .token.doctype, .token.cdata { color:#5c6370; font-style:italic; }
+  .token.punctuation { color:#abb2bf; }
+  .token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol, .token.deleted { color:#f78c6c; }
+  .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted { color:#c3e88d; }
+  .token.operator, .token.entity, .token.url, .language-css .token.string, .style .token.string { color:#89ddff; background:transparent; }
+  .token.atrule, .token.attr-value, .token.keyword { color:#c792ea; }
+  .token.function, .token.class-name { color:#82aaff; }
+  .token.regex, .token.important, .token.variable { color:#ffcb6b; }
+  .line-numbers .line-numbers-rows { border-right-color:#2d313a; }
+  .line-numbers-rows > span:before { color:#3e4451; }
+  ::selection { background:#3d4451; color:#e2e8f0; }
+  ::-webkit-scrollbar { width:12px; height:12px; }
+  ::-webkit-scrollbar-track { background:#1a1d23; }
+  ::-webkit-scrollbar-thumb { background:#3d4451; border-radius:6px; }
+  ::-webkit-scrollbar-thumb:hover { background:#4d5461; }
+"""
 
-    Earlier builds rendered source inside another QWebEngineView for Prism. That was
-    pretty, but on some Windows/PySide6 builds it could render blank. This viewer is
-    intentionally boring: QPlainTextEdit, native copy/select/find/save, and no web
-    engine dependency.
+
+class SourceDialog(QDialog):
+    """Pretty source viewer with Prism-highlighted view and plain-text fallback.
+
+    Default view is a QWebEngineView rendering the source through Prism with a
+    custom dark "One Dark"-ish theme. A toggle button switches to a plain
+    QPlainTextEdit if Prism fails to render (older PySide6 builds occasionally
+    blank-paint a second WebEngine on the same page). Copy/Save/Find work in
+    both modes and operate against the same backing source string.
     """
 
     def __init__(self, source: str, language: str = "markup", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.source = source or "<!-- empty source -->"
-        self.language = language
-        self.setWindowTitle(loc("View Source"))
+        self.language = language or "markup"
+        self.setWindowTitle(loc(f"View Source — {self.language}"))
         self.resize(1120, 780)
 
         self.findBox = QLineEdit(self)
         self.findBox.setPlaceholderText(loc("Find in source... Ctrl+F"))
+
+        # Plain fallback editor — always built, always works.
         self.editor = QPlainTextEdit(self)
         self.editor.setReadOnly(True)
         self.editor.setPlainText(self.source)
@@ -782,11 +824,34 @@ class SourceDialog(QDialog):
         self.editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(self.openSourceContextMenu)
 
+        # Prism-highlighted view — only created if Prism assets are available.
+        self.prismView: QWebEngineView | None = None
+        prismAvailable = (PRISM / "prism.min.css").exists() and (PRISM / "prism.min.js").exists()
+        if prismAvailable:
+            try:
+                self.prismView = QWebEngineView(self)
+                self.prismView.setHtml(self.buildPrismHtml(self.source, self.language), QUrl.fromLocalFile(str(ROOT / "source_dialog.html")))
+            except Exception as error:
+                recordException("supergrok_bridge/app.py:SourceDialog.prism-init", error, extra={"handler": "prism view init"})
+                self.prismView = None
+
+        self.stack = QStackedWidget(self)
+        if self.prismView is not None:
+            self.stack.addWidget(self.prismView)  # index 0 — Prism
+            self.stack.addWidget(self.editor)     # index 1 — plain fallback
+            self.stack.setCurrentIndex(0)
+        else:
+            self.stack.addWidget(self.editor)
+            self.stack.setCurrentIndex(0)
+
         saveButton = QPushButton(loc("Save As..."), self)
         copyAllButton = QPushButton(loc("Copy All"), self)
         closeButton = QPushButton(loc("Close"), self)
         findNextButton = QPushButton(loc("Find Next"), self)
         findPreviousButton = QPushButton(loc("Find Prev"), self)
+        self.toggleButton = QPushButton(loc("Plain"), self) if self.prismView is not None else QPushButton(loc("Plain"), self)
+        self.toggleButton.setEnabled(self.prismView is not None)
+        self.toggleButton.setToolTip(loc("Toggle Prism highlight / plain text view"))
 
         saveButton.clicked.connect(self.saveSourceAs)
         copyAllButton.clicked.connect(self.copyAllSource)
@@ -794,6 +859,7 @@ class SourceDialog(QDialog):
         self.findBox.returnPressed.connect(self.findNextSource)
         findNextButton.clicked.connect(self.findNextSource)
         findPreviousButton.clicked.connect(self.findPreviousSource)
+        self.toggleButton.clicked.connect(self.toggleHighlightMode)
 
         focusFindAction = QAction(loc("Find"), self)
         focusFindAction.setShortcut(QKeySequence.StandardKey.Find)
@@ -810,23 +876,77 @@ class SourceDialog(QDialog):
         selectAllAction.triggered.connect(self.editor.selectAll)
         self.addAction(selectAllAction)
 
+        modeLabel = loc("Highlighted source") if self.prismView is not None else loc("Plain source viewer")
         buttonRow = QHBoxLayout()
-        buttonRow.addWidget(QLabel(loc("Plain source viewer"), self))
+        buttonRow.addWidget(QLabel(modeLabel, self))
         buttonRow.addWidget(self.findBox, 1)
         buttonRow.addWidget(findPreviousButton)
         buttonRow.addWidget(findNextButton)
+        buttonRow.addWidget(self.toggleButton)
         buttonRow.addWidget(copyAllButton)
         buttonRow.addWidget(saveButton)
         buttonRow.addWidget(closeButton)
 
         layout = QVBoxLayout(self)
         layout.addLayout(buttonRow)
-        layout.addWidget(self.editor, 1)
+        layout.addWidget(self.stack, 1)
+
+    def buildPrismHtml(self, source: str, language: str) -> str:
+        escapedSource = html.escape(source, quote=False)
+        prismCss = QUrl.fromLocalFile(str(PRISM / "prism.min.css")).toString()
+        prismJs = QUrl.fromLocalFile(str(PRISM / "prism.min.js")).toString()
+        # Component scripts are optional — present a small whitelist.
+        componentTags = []
+        for name in ("prism-markup.min.js", "prism-javascript.min.js", "prism-css.min.js", "prism-json.min.js", "prism-python.min.js", "prism-bash.min.js", "prism-powershell.min.js", "prism-sql.min.js", "prism-yaml.min.js"):
+            path = PRISM / "components" / name
+            if path.exists():
+                componentTags.append(f'<script src="{html.escape(QUrl.fromLocalFile(str(path)).toString())}"></script>')
+        cssTag = f'<link rel="stylesheet" href="{html.escape(prismCss)}">'
+        jsTag = f'<script src="{html.escape(prismJs)}"></script>'
+        comps = "\n".join(componentTags)
+        return f'''<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>View Source</title>
+{cssTag}
+<style>{SOURCE_DIALOG_DARK_THEME_CSS}</style>
+</head>
+<body>
+<pre><code class="language-{html.escape(language)}">{escapedSource}</code></pre>
+{jsTag}
+{comps}
+<script>if (window.Prism) {{ Prism.highlightAll(); }}</script>
+</body>
+</html>'''
+
+    @Slot()
+    def toggleHighlightMode(self) -> None:
+        if self.prismView is None:
+            return
+        if self.stack.currentIndex() == 0:
+            self.stack.setCurrentIndex(1)
+            self.toggleButton.setText(loc("Highlight"))
+        else:
+            self.stack.setCurrentIndex(0)
+            self.toggleButton.setText(loc("Plain"))
+
+    def _findInPrism(self, text: str, backward: bool = False) -> None:
+        if self.prismView is None:
+            return
+        try:
+            flags = QWebEnginePage.FindFlag.FindBackward if backward else QWebEnginePage.FindFlag(0)
+            self.prismView.findText(text, flags)
+        except Exception as error:
+            recordException("supergrok_bridge/app.py:SourceDialog._findInPrism", error, extra={"backward": backward})
 
     @Slot()
     def findNextSource(self) -> None:
         text = self.findBox.text()
         if not text:
+            return
+        if self.prismView is not None and self.stack.currentIndex() == 0:
+            self._findInPrism(text, backward=False)
             return
         if not self.editor.find(text):
             self.editor.moveCursor(QTextCursor.MoveOperation.Start)
@@ -836,6 +956,9 @@ class SourceDialog(QDialog):
     def findPreviousSource(self) -> None:
         text = self.findBox.text()
         if not text:
+            return
+        if self.prismView is not None and self.stack.currentIndex() == 0:
+            self._findInPrism(text, backward=True)
             return
         if not self.editor.find(text, QTextDocument.FindFlag.FindBackward):
             self.editor.moveCursor(QTextCursor.MoveOperation.End)
@@ -4532,8 +4655,10 @@ class SuperGrokBridgeWindow(QMainWindow):
         self.mainSplitter.addWidget(self.chat)
         self.mainSplitter.addWidget(self.grokContainer)
         self.mainSplitter.setChildrenCollapsible(True)
+        self.mainSplitter.setHandleWidth(6)
         self.mainSplitter.setSizes([360, 500, 820])
         self.setCentralWidget(self.mainSplitter)
+        self.applyBridgeChrome()
         self.columnActions: dict[str, QAction] = {}
         self.columnWidgets: dict[str, QWidget] = {
             "debug": self.debugPane,
@@ -4555,6 +4680,44 @@ class SuperGrokBridgeWindow(QMainWindow):
 
         if config.remoteDebugPort:
             self.statusBar().showMessage(f"Chromium DevTools remote: http://127.0.0.1:{config.remoteDebugPort}")
+
+    def applyBridgeChrome(self) -> None:
+        # Scoped stylesheet for the bridge chrome: toolbar / splitter handles /
+        # buttons / labels / status bar. Deliberately does NOT target QWebEngineView
+        # or its children — Chromium owns its own painting and we don't want to
+        # interfere with composition (especially on Windows offscreen-window mode).
+        self.setStyleSheet(
+            """
+            QMainWindow { background: #1f232b; }
+            QStatusBar { background: #15181e; color: #c7cdd6; border-top: 1px solid #2d313a; }
+            QToolBar { background: #15181e; border-bottom: 1px solid #2d313a; spacing: 2px; padding: 4px; }
+            QToolBar QToolButton { color: #e2e8f0; background: transparent; padding: 4px 10px; border-radius: 4px; }
+            QToolBar QToolButton:hover { background: #2a2f3a; }
+            QToolBar QToolButton:pressed { background: #3a4150; }
+            QPushButton { background: #2a2f3a; color: #e2e8f0; border: 1px solid #3d4451; border-radius: 4px; padding: 5px 12px; }
+            QPushButton:hover { background: #343a47; border-color: #4d5461; }
+            QPushButton:pressed { background: #1f232b; }
+            QPushButton:disabled { color: #5c6370; background: #20242c; border-color: #2d313a; }
+            QLabel { color: #c7cdd6; }
+            QLineEdit { background: #15181e; color: #e2e8f0; border: 1px solid #2d313a; border-radius: 4px; padding: 4px 8px; selection-background-color: #3d4451; }
+            QLineEdit:focus { border-color: #82aaff; }
+            QMenuBar { background: #15181e; color: #c7cdd6; }
+            QMenuBar::item:selected { background: #2a2f3a; }
+            QMenu { background: #1f232b; color: #e2e8f0; border: 1px solid #2d313a; }
+            QMenu::item:selected { background: #2a2f3a; }
+            QSplitter::handle { background: #2d313a; }
+            QSplitter::handle:horizontal { width: 6px; margin: 0 1px; border-left: 1px solid #15181e; border-right: 1px solid #15181e; }
+            QSplitter::handle:vertical { height: 6px; margin: 1px 0; border-top: 1px solid #15181e; border-bottom: 1px solid #15181e; }
+            QSplitter::handle:hover { background: #82aaff; }
+            #MainColumnSplitter::handle { background: #3d4451; }
+            #MainColumnSplitter::handle:hover { background: #82aaff; }
+            QPlainTextEdit { background: #15181e; color: #e2e8f0; border: 1px solid #2d313a; selection-background-color: #3d4451; }
+            QListWidget { background: #15181e; color: #e2e8f0; border: 1px solid #2d313a; }
+            QListWidget::item:selected { background: #2a2f3a; }
+            QDockWidget { color: #c7cdd6; }
+            QDockWidget::title { background: #15181e; padding: 4px; }
+            """
+        )
 
     def debuggerVarDump(self) -> dict[str, Any]:
         currentUrl = ""
@@ -5220,8 +5383,10 @@ class SuperGrokBridgeWindow(QMainWindow):
         toolbar = QToolBar("Main", self)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
+        providerLabel = self.providerLabel
+        liveLabel = f"Live {providerLabel} Website"
 
-        reloadAction = QAction(loc("Reload Grok"), self)
+        reloadAction = QAction(loc(f"Reload {providerLabel}"), self)
         reloadAction.setShortcut(QKeySequence.StandardKey.Refresh)
         reloadAction.triggered.connect(self.grokView.reload)
         toolbar.addAction(reloadAction)
@@ -5235,14 +5400,14 @@ class SuperGrokBridgeWindow(QMainWindow):
         toolbar.addAction(forwardAction)
 
         devToolsAction = QAction(loc("DevTools"), self)
-        devToolsAction.triggered.connect(lambda: self.openDevToolsForPage(self.grokView.page(), "Live Grok Website", False))
+        devToolsAction.triggered.connect(lambda: self.openDevToolsForPage(self.grokView.page(), liveLabel, False))
         toolbar.addAction(devToolsAction)
 
-        inspectAction = QAction(loc("Inspect Grok"), self)
-        inspectAction.triggered.connect(lambda: self.openDevToolsForPage(self.grokView.page(), "Live Grok Website", True))
+        inspectAction = QAction(loc(f"Inspect {providerLabel}"), self)
+        inspectAction.triggered.connect(lambda: self.openDevToolsForPage(self.grokView.page(), liveLabel, True))
         toolbar.addAction(inspectAction)
 
-        viewSourceAction = QAction(loc("View Grok Source"), self)
+        viewSourceAction = QAction(loc(f"View {providerLabel} Source"), self)
         viewSourceAction.triggered.connect(lambda: self.showSourceForView(self.grokView))
         toolbar.addAction(viewSourceAction)
 

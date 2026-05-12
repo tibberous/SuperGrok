@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+# ============================================================================
+#  SuperGrok Bridge
+#  ---------------------------------------------------------------------------
+#  A QtWebEngine bridge that hosts Grok, ChatGPT, Gemini, and Claude web
+#  sessions in a single persistent-profile Qt window, with a CLI for headless
+#  prompts, attachments, and a resident bridge service.
+#
+#  Author : Trenton Tompkins  <trentontompkins@gmail.com>
+#  Phone  : 724-431-5207
+#  GitHub : https://github.com/tibberous/SuperGrok
+#
+#  Need help on your next project?
+#  Call me at 724-431-5207 for a free consultation!
+#
+#  Codex by Claude Opus 4.7 and ChatGPT 5.5.
+# ============================================================================
 from __future__ import annotations
 
 import argparse
@@ -27,6 +43,7 @@ except Exception:  # swallow-ok: launcher must still print dependency failures.
     _recordException = None
 
 APP_NAME = "SuperGrok Bridge"
+APP_VERSION = "1.0.1"
 DEFAULT_GROK_URL = "https://grok.com/"
 DEFAULT_CHATGPT_URL = "https://chatgpt.com/"
 DEFAULT_GEMINI_URL = "https://gemini.google.com/app"
@@ -794,6 +811,9 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--debugger-vardump", action="store_true", help="Print a small JSON launcher vardump and exit.")
     parser.add_argument("--debugger-menu", action="store_true", help="Print start.py debugger menu/status and exit.")
     parser.add_argument("--debug", action="store_true", help="Print launcher/app debug traces.")
+    parser.add_argument("--ver", "--version", action="store_true", help=f"Print version ({APP_NAME} {APP_VERSION}) and exit.")
+    parser.add_argument("--login", action="store_true", help="Open a stripped-down login-only window for the chosen --target (or --grok/--chatgpt/--gemini/--claude).")
+    parser.add_argument("--probe-auth", action="store_true", help="Headless: load the chosen --target home URL, report logged-in/out state and minimum no-scroll login window size as JSON, then exit.")
     return parser
 
 
@@ -1768,6 +1788,9 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     if len(argv) == 1 and argv[0].lower() in {"help", "man", "/?", "/help", "-?"}:
         print(buildParser().format_help())
+        return 0
+    if len(argv) == 1 and argv[0].lower() in {"--ver", "--version", "-v", "/ver", "/version"}:
+        print(f"{APP_NAME} {APP_VERSION}")
         return 0
     parser = buildParser()
     args, unknown = parser.parse_known_args(argv)

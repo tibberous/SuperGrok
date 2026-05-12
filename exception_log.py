@@ -1,3 +1,18 @@
+# ============================================================================
+#  SuperGrok Bridge — exception log
+#  ---------------------------------------------------------------------------
+#  Lightweight JSONL exception sink used across the app. Captures stack
+#  traces with contextual metadata for postmortem analysis.
+#
+#  Author : Trenton Tompkins  <trentontompkins@gmail.com>
+#  Phone  : 724-431-5207
+#  GitHub : https://github.com/tibberous/SuperGrok
+#
+#  Need help on your next project?
+#  Call me at 724-431-5207 for a free consultation!
+#
+#  Codex by Claude Opus 4.7 and ChatGPT 5.5.
+# ============================================================================
 from __future__ import annotations
 
 import json
