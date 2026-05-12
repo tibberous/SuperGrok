@@ -1,0 +1,624 @@
+# knownimports.txt — known Python import names (one per line)
+# stdlib is added at runtime via sys.stdlib_module_names, so it is NOT duplicated here.
+# pip list is also merged at runtime. This file is the curated third-party supplement.
+# Add entries here when you encounter packages the runtime pip list doesn't cover.
+
+# ---------------------------------------------------------------------------
+# Core scientific / numeric
+# ---------------------------------------------------------------------------
+numpy
+np
+pandas
+pd
+scipy
+sympy
+statsmodels
+sklearn
+skimage
+cv2
+PIL
+matplotlib
+seaborn
+plotly
+bokeh
+altair
+pylab
+mpl_toolkits
+numba
+cupy
+jax
+flax
+optax
+haiku
+torch
+torchvision
+torchaudio
+tensorflow
+tf
+keras
+transformers
+datasets
+accelerate
+diffusers
+peft
+trl
+sentence_transformers
+faiss
+chromadb
+qdrant_client
+pinecone
+weaviate
+langchain
+langchain_core
+langchain_community
+openai
+anthropic
+google
+google_genai
+google_generativeai
+googleapiclient
+tiktoken
+huggingface_hub
+tokenizers
+evaluate
+peft
+bitsandbytes
+einops
+timm
+
+# ---------------------------------------------------------------------------
+# Web / HTTP
+# ---------------------------------------------------------------------------
+requests
+httpx
+aiohttp
+urllib3
+httplib2
+grequests
+treq
+twisted
+tornado
+flask
+Flask
+django
+fastapi
+starlette
+quart
+sanic
+bottle
+falcon
+cherrypy
+pyramid
+litestar
+uvicorn
+gunicorn
+waitress
+hypercorn
+daphne
+werkzeug
+itsdangerous
+click
+jinja2
+mako
+markupsafe
+wtforms
+marshmallow
+pydantic
+attrs
+attr
+cerberus
+voluptuous
+jsonschema
+apispec
+flasgger
+swagger_ui_bundle
+openapi_schema_validator
+
+# ---------------------------------------------------------------------------
+# Database / ORM
+# ---------------------------------------------------------------------------
+sqlalchemy
+alembic
+sqlmodel
+tortoise
+peewee
+pony
+pymongo
+motor
+elasticsearch
+opensearchpy
+cassandra
+aerospike
+influxdb
+redis
+aioredis
+fakeredis
+pymemcache
+psycopg2
+psycopg
+asyncpg
+aiomysql
+MySQLdb
+pymysql
+pyodbc
+cx_Oracle
+sqlite3
+tinydb
+pickledb
+shelve
+databases
+
+# ---------------------------------------------------------------------------
+# Async / concurrency
+# ---------------------------------------------------------------------------
+asyncio
+trio
+anyio
+curio
+greenlet
+gevent
+eventlet
+concurrent
+multiprocessing
+threading
+queue
+celery
+kombu
+dramatiq
+rq
+apscheduler
+schedule
+nats
+aio_pika
+pika
+kafka
+confluent_kafka
+aiokafka
+zmq
+pyzmq
+
+# ---------------------------------------------------------------------------
+# CLI / TUI / output
+# ---------------------------------------------------------------------------
+click
+typer
+fire
+docopt
+argparse
+colorama
+termcolor
+rich
+tqdm
+blessed
+curses
+urwid
+asciimatics
+textual
+prompt_toolkit
+inquirer
+questionary
+alive_progress
+halo
+loguru
+structlog
+colorlog
+python_json_logger
+
+# ---------------------------------------------------------------------------
+# File / archive / serialization
+# ---------------------------------------------------------------------------
+yaml
+bs4
+lxml
+html5lib
+toml
+tomllib
+orjson
+ujson
+msgpack
+protobuf
+grpc
+thrift
+avro
+pyarrow
+h5py
+tables
+zarr
+netCDF4
+xarray
+openpyxl
+xlrd
+xlwt
+xlsxwriter
+docx
+pptx
+fitz
+fpdf
+reportlab
+tabula
+camelot
+pdfplumber
+pdfminer
+PyPDF2
+pypdf
+magic
+filetype
+chardet
+charset_normalizer
+pyaml
+ruamel
+
+# ---------------------------------------------------------------------------
+# Imaging / media
+# ---------------------------------------------------------------------------
+PIL
+cv2
+skimage
+imageio
+mahotas
+wand
+cairosvg
+svglib
+qrcode
+barcode
+zxing
+pyzbar
+pyheif
+rawpy
+tifffile
+soundfile
+librosa
+pyaudio
+pydub
+mutagen
+eyed3
+taglib
+ffmpeg
+av
+moviepy
+imageio_ffmpeg
+
+# ---------------------------------------------------------------------------
+# GUI / desktop
+# ---------------------------------------------------------------------------
+tkinter
+wx
+gi
+PySide6
+PySide2
+PyQt5
+PyQt6
+Qt
+kivy
+kivymd
+pyqt5
+pyqt6
+pyside6
+pyside2
+qdarkstyle
+qdarktheme
+pyqtdarktheme
+pyglet
+pygame
+arcade
+glfw
+OpenGL
+pyopengl
+glm
+imgui
+
+# ---------------------------------------------------------------------------
+# Fonts / typography
+# ---------------------------------------------------------------------------
+fonttools
+fontforge
+psMat
+
+# ---------------------------------------------------------------------------
+# Crypto / security
+# ---------------------------------------------------------------------------
+cryptography
+OpenSSL
+Crypto
+Cryptodome
+jwt
+jose
+bcrypt
+argon2
+hashlib
+secrets
+ssl
+certifi
+pyotp
+qrcode
+
+# ---------------------------------------------------------------------------
+# Networking / protocols
+# ---------------------------------------------------------------------------
+socket
+ssl
+paramiko
+fabric
+invoke
+sh
+plumbum
+nmap
+scapy
+dpkt
+pyshark
+netaddr
+ipaddress
+dns
+serial
+usb
+hid
+bluetooth
+bleak
+zeroconf
+mdns
+
+# ---------------------------------------------------------------------------
+# DevOps / system / cloud
+# ---------------------------------------------------------------------------
+psutil
+pynput
+pyautogui
+pygetwindow
+pyperclip
+keyboard
+mouse
+watchdog
+send2trash
+pywin32
+win32api
+win32con
+win32gui
+win32com
+pythoncom
+pywintypes
+wmi
+comtypes
+winreg
+winsound
+ctypes
+cffi
+msl
+boto3
+botocore
+s3transfer
+google_cloud
+azure
+openstack
+docker
+kubernetes
+ansible
+
+# ---------------------------------------------------------------------------
+# Testing / quality
+# ---------------------------------------------------------------------------
+pytest
+unittest
+hypothesis
+nose
+nose2
+tox
+nox
+coverage
+codecov
+faker
+factory_boy
+responses
+respx
+vcrpy
+freezegun
+time_machine
+pytest_mock
+mock
+parameterized
+testfixtures
+mypy
+pyright
+pytype
+pylint
+flake8
+ruff
+black
+isort
+autopep8
+bandit
+safety
+semgrep
+
+# ---------------------------------------------------------------------------
+# Build / packaging
+# ---------------------------------------------------------------------------
+setuptools
+pkg_resources
+distlib
+build
+wheel
+twine
+hatch
+pdm
+poetry
+flit
+meson
+cmake
+scons
+invoke
+nox
+
+# ---------------------------------------------------------------------------
+# Date / time / i18n
+# ---------------------------------------------------------------------------
+dateutil
+arrow
+pendulum
+humanize
+babel
+pytz
+zoneinfo
+freezegun
+
+# ---------------------------------------------------------------------------
+# Config / env
+# ---------------------------------------------------------------------------
+dotenv
+dynaconf
+decouple
+environs
+pydantic_settings
+
+# ---------------------------------------------------------------------------
+# Math / stats / ML utilities
+# ---------------------------------------------------------------------------
+dask
+vaex
+polars
+modin
+pyarrow
+joblib
+cloudpickle
+dill
+multiprocess
+ray
+optuna
+hyperopt
+mlflow
+wandb
+lightning
+pytorch_lightning
+ignite
+catalyst
+
+# ---------------------------------------------------------------------------
+# NLP / text
+# ---------------------------------------------------------------------------
+nltk
+spacy
+gensim
+textblob
+pattern
+flair
+stanza
+allennlp
+sacremoses
+sentencepiece
+unidecode
+ftfy
+langdetect
+langid
+polyglot
+chardet
+Levenshtein
+difflib
+fuzzywuzzy
+rapidfuzz
+thefuzz
+pyenchant
+hunspell
+pyphen
+slugify
+
+# ---------------------------------------------------------------------------
+# Bioinformatics / science
+# ---------------------------------------------------------------------------
+Bio
+biopython
+scipy
+MDAnalysis
+mdtraj
+openmm
+simtk
+pdbfixer
+pydicom
+nibabel
+nilearn
+mne
+pyedflib
+SimpleITK
+itk
+vtk
+
+# ---------------------------------------------------------------------------
+# GIS / mapping
+# ---------------------------------------------------------------------------
+geopandas
+shapely
+fiona
+pyproj
+rasterio
+folium
+geopy
+osmnx
+pyogrio
+cartopy
+pyepsg
+pyshp
+
+# ---------------------------------------------------------------------------
+# Misc popular packages
+# ---------------------------------------------------------------------------
+cachetools
+diskcache
+dogpile
+beaker
+expiringdict
+sortedcontainers
+bitarray
+bidict
+more_itertools
+toolz
+cytoolz
+funcy
+boltons
+attrdict
+box
+dotmap
+munch
+addict
+dacite
+desert
+marshmallow_dataclass
+pydantic
+cattrs
+glom
+deepmerge
+mergedeep
+deepdiff
+jsondiff
+jsonpatch
+jsonpointer
+jsonmerge
+tabulate
+prettytable
+terminaltables
+texttable
+pandas_flavor
+pandas_profiling
+ydata_profiling
+dtale
+bamboolib
+missingno
+hvplot
+panel
+param
+holoviews
+datashader
+colorcet
+networkx
+igraph
+graph_tool
+pyvis
+nxviz
+graphviz
+pydot
+pygraphviz
+diagrams
+plantuml
+
+fontTools
+
+restartmgr
+
+nodejs_wheel

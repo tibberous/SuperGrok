@@ -1,0 +1,10 @@
+RAW SQL DETECTOR REPORT
+=======================
+Version: 2.0.0
+
+Generated at: 2026-05-12T06:30:50
+Root: C:\SuperGrok
+Files scanned: 4
+Findings: 0
+
+No raw SQL connector/cursor/execute candidates found in scanned app paths.

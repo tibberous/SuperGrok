@@ -1,0 +1,22 @@
+SWALLOWED EXCEPTIONS DETECTOR REPORT
+====================================
+Version: 3.1.0-base-parallel
+
+Generated at: 2026-05-12T06:30:36
+Root: C:\SuperGrok
+Files scanned: 4
+Findings: 0
+Severity counts: <none>
+Rule counts: <none>
+
+Rules:
+  SE001 empty except handler
+  SE002 pass/return/continue/break-only except handler
+  SE003 silent null/false return from except handler
+  SE004 control-flow exit from except handler without fault propagation
+  SE005 trace-and-swallow handler
+  SE006 catch-all handler that only logs/traces
+  SE007 catch-all handler lacks recognized fault/warning surface
+
+Findings:
+No swallowed candidates found in scanned app paths.

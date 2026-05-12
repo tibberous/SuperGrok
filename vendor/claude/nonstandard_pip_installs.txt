@@ -1,0 +1,72 @@
+WEIRD_IMPORT_INSTALL_MAP = {
+    # Font / graphics weirdos
+    "fontforge": ["fontforge", "python3-fontforge"],
+    "psMat": ["fontforge", "python3-fontforge"],
+
+    # Famous pip-name != import-name cases
+    "PIL": ["Pillow", "python3-pil"],
+    "cv2": ["opencv-python", "opencv-python-headless", "python3-opencv"],
+    "sklearn": ["scikit-learn", "python3-sklearn"],
+    "skimage": ["scikit-image", "python3-skimage"],
+    "yaml": ["PyYAML", "python3-yaml"],
+    "bs4": ["beautifulsoup4", "python3-bs4"],
+    "serial": ["pyserial", "python3-serial"],
+    "dateutil": ["python-dateutil", "python3-dateutil"],
+    "dotenv": ["python-dotenv"],
+    "fitz": ["PyMuPDF"],
+    "wx": ["wxPython"],
+
+    # Windows / COM
+    "win32api": ["pywin32"],
+    "win32con": ["pywin32"],
+    "win32gui": ["pywin32"],
+    "win32com": ["pywin32"],
+    "pythoncom": ["pywin32"],
+    "pywintypes": ["pywin32"],
+
+    # Database/client drivers
+    "MySQLdb": ["mysqlclient"],
+    "psycopg2": ["psycopg2-binary", "psycopg2"],
+    "pymysql": ["PyMySQL"],
+
+    # Crypto/security
+    "OpenSSL": ["pyOpenSSL"],
+    "Crypto": ["pycryptodome"],
+    "Cryptodome": ["pycryptodomex"],
+    "jwt": ["PyJWT"],
+    "jose": ["python-jose"],
+    "dns": ["dnspython"],
+
+    # Documents / files
+    "docx": ["python-docx"],
+    "pptx": ["python-pptx"],
+    "magic": ["python-magic", "python-magic-bin", "libmagic"],
+    "barcode": ["python-barcode"],
+    "slugify": ["python-slugify"],
+
+    # Google / cloud namespace packages
+    "google.genai": ["google-genai"],
+    "google.generativeai": ["google-generativeai"],  # deprecated old Gemini SDK
+    "googleapiclient": ["google-api-python-client"],
+    "google.auth": ["google-auth"],
+    "google.protobuf": ["protobuf"],
+    "grpc": ["grpcio"],
+
+    # Linux GUI / native bindings
+    "gi": ["PyGObject", "python3-gi", "python3-gobject"],
+    "gi.repository": ["PyGObject", "python3-gi", "python3-gobject", "gir1.2-* typelibs"],
+    "cairo": ["pycairo", "python3-cairo"],
+    "dbus": ["dbus-python", "python3-dbus"],
+    "apt": ["python3-apt"],
+    "apt_pkg": ["python3-apt"],
+    "rpm": ["python3-rpm"],
+    "dnf": ["python3-dnf"],
+
+    # Misc common traps
+    "usb": ["pyusb"],
+    "Levenshtein": ["python-Levenshtein"],
+    "Bio": ["biopython"],
+    "pkg_resources": ["setuptools"],
+    "mpl_toolkits": ["matplotlib"],
+    "qdarkstyle": ["QDarkStyle"],
+}

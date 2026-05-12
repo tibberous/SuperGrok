@@ -1,0 +1,688 @@
+FlatLine / PyEncoder Lifecycle Phase Architecture
+==================================================
+Whitepaper for GPT Code Models — Implementation Guide
+Date: 2026-05-02
+
+This document explains the lifecycle phase architecture used in PyEncoder (and TrioDesktop/FlatLine
+projects). It is written for GPT code models who will be implementing or auditing code. Read it
+completely before touching anything related to process startup, subprocess calls, threading, or
+long-running work.
+
+
+CORE RULE
+---------
+
+If it can hang, crash, block, install, probe tools, make network calls, run long, or own app work,
+it must be a lifecycle Phase with a TTL, a PID, and error/fault/timeout callbacks.
+
+No exceptions. The debugger must survive everything.
+
+
+WHY THIS ARCHITECTURE EXISTS
+-----------------------------
+
+The FlatLine debugger is the parent process. It must remain alive when the app child crashes,
+a dependency install hangs, a font install triggers UAC, a tool probe takes 60 seconds, or a
+network call never returns.
+
+If the debugger and the blocking work share the same OS process and the same Python interpreter,
+then a deadlock in the blocking work kills the debugger too. That defeats the entire purpose.
+
+The architecture enforces a hard boundary:
+
+    start.py (parent debugger / supervisor)
+        ├── Owns lifecycle phases
+        ├── Key loop stays alive (D → debugger console)
+        ├── Records phase/process status to DB
+        ├── TTL enforcement + taskkill on timeout
+        └── Launches workers as child OS processes
+
+    gtp.py / main app (child process)
+        ├── Dies without killing parent
+        ├── Reports crash info back
+        └── Can be relaunched
+
+The parent debugger MUST be able to:
+  - Print status while workers run
+  - Kill a timed-out worker with taskkill /T /F
+  - Relaunch after a worker fault
+  - Accept D key input at any point during startup
+
+
+THE TWO PHASE CLASSES
+----------------------
+
+There are two Phase classes. Know both.
+
+1. start.py Phase — used by the parent launcher lifecycle controller (StartLifecycleController)
+
+    Phase(
+        phaseId=100,
+        key='my-work-key',
+        name='My Work',
+        process=StartProcess(...),   # or callback=...
+        ttl=120.0,                   # REQUIRED — seconds before kill
+        group='startup',
+        onComplete=lambda p: ...,
+        onError=lambda p: ...,
+        onFault=lambda p: ...,
+        onException=lambda p: ...,
+        onTimeout=lambda p: ...,
+    )
+
+2. classes/AppLifeCycle.py LifeCyclePhase — used by the app child lifecycle controller
+
+    LifeCyclePhase(
+        key='encode-audio',
+        callback=self._encodeAudio,
+        label='Encode Audio',
+        on_error=self._onEncodeError,
+        on_fault=self._onEncodeFault,
+        on_exception=self._onEncodeException,
+        timeout_seconds=120.0,       # REQUIRED
+        ttl_seconds=180.0,           # REQUIRED
+        process=my_process,
+    )
+
+Both require TTL. No TTL = the phase can hang forever = the debugger can hang forever.
+
+
+THE StartProcess CLASS
+-----------------------
+
+Every OS child process must be wrapped in StartProcess. Never call subprocess.Popen directly
+except inside an approved lifecycle wrapper function.
+
+    # WRONG — raw Popen blocks the debugger on hang
+    proc = subprocess.Popen(['ffmpeg', '-i', input_path, output_path])
+    proc.wait()   # hangs forever if ffmpeg hangs
+
+    # CORRECT
+    process = StartProcess(
+        command=['ffmpeg', '-i', input_path, output_path],
+        name='FFmpegEncode',
+        ttlSeconds=300.0,
+        cwd=str(BASE_DIR),
+    )
+    process.onError(lambda p: print(f'[WARN:encode] ffmpeg error exit={p.returnCode}'))
+    process.onTimeout(lambda p: print(f'[WARN:encode] ffmpeg TTL expired'))
+    process.onFault(lambda p: print(f'[WARN:encode] ffmpeg fault: {p.error}'))
+    process.start()
+    pid = process.pid   # ALWAYS capture the pid
+
+StartProcess.start() automatically:
+  - Registers with the lifecycle controller
+  - Creates a DB process record with pid, command, phase key
+  - Sets up TTL enforcement via superviseProcesses()
+  - Kills with taskkill /T /F on TTL expiry
+  - Fires onTimeout, onFault, onError callbacks
+
+
+PID IS MANDATORY
+----------------
+
+Every StartProcess.start() call must be followed by pid capture. The lifecycle controller uses
+the pid to:
+  - Write to the process DB table
+  - taskkill on TTL expiry
+  - Report to the debugger surface
+
+    process.start()
+    pid = process.pid      # REQUIRED on the next line or within 5 lines
+
+If the process object is returned or stored, the pid must be accessible via process.pid at
+the call site. The lifecycle bypass detector (lifecyclebypassdetector.py) will flag .start()
+calls with no .pid reference in the next 5 lines.
+
+    # OK — pid accessed via return value
+    proc = process.start()
+    stored_pid = proc.pid
+
+    # OK — pid on process object accessed later
+    self.encodeProcess = process
+    process.start()
+    print(f'encoder pid={self.encodeProcess.pid}')
+
+    # FLAGGED — no pid capture
+    process.start()
+    doNextThing()   # detector flags this
+
+
+TTL IS MANDATORY
+----------------
+
+Every Phase and StartProcess must have a TTL. The TTL is the wall-clock seconds after which
+the lifecycle controller kills the process and fires onTimeout.
+
+Rule of thumb for TTL values:
+
+    Font install worker:       300s  (UAC + copy + registry)
+    Dependency pip install:    600s  (slow network)
+    Model catalog probe:        60s  (network HTTP)
+    FFmpeg encode:             None? Use per-file estimate + 60s buffer
+    Database migration:         30s
+    File hash check:            10s
+    Tool probe (where/which):    5s
+    Headless smoke test:        30s
+
+If you cannot estimate a TTL, use 300s and add a comment explaining why.
+
+    # WRONG
+    Phase(phaseId=10, key='my-phase', callback=myCallback)
+
+    # WRONG — ttl=0 is treated as no TTL
+    Phase(phaseId=10, key='my-phase', callback=myCallback, ttl=0)
+
+    # CORRECT
+    Phase(phaseId=10, key='my-phase', callback=myCallback, ttl=120.0)
+
+
+ERROR / FAULT / TIMEOUT CALLBACKS
+----------------------------------
+
+Every process phase should register all three signal handlers. The minimum set is
+onError + onTimeout. onFault and onException add extra safety.
+
+Definitions:
+  onError    — process exited with non-zero return code
+  onFault    — something structurally wrong (e.g. process never started, command not found)
+  onException — Python exception during phase execution
+  onTimeout  — TTL expired; process was killed
+
+Example with all handlers:
+
+    def _onEncodeError(phase_or_process, payload=None):
+        rc = getattr(phase_or_process, 'returnCode', None) or getattr(phase_or_process, 'error', None)
+        print(f'[WARN:encode] process error exit={rc}', file=sys.stderr, flush=True)
+        recordException('encoder.error', None)
+
+    def _onEncodeFault(phase_or_process, payload=None):
+        reason = getattr(phase_or_process, 'faultReason', '') or getattr(phase_or_process, 'error', '')
+        print(f'[WARN:encode] process fault: {reason}', file=sys.stderr, flush=True)
+
+    def _onEncodeTimeout(phase_or_process, payload=None):
+        print(f'[WARN:encode] TTL expired — killing encoder', file=sys.stderr, flush=True)
+
+    def _onEncodeException(phase_or_process, payload=None):
+        tb = getattr(phase_or_process, 'tracebackText', '') or ''
+        print(f'[WARN:encode] exception:\n{tb}', file=sys.stderr, flush=True)
+
+    process = StartProcess(
+        command=build_ffmpeg_command(job),
+        name=f'FFmpegEncode:{job.output_name}',
+        ttlSeconds=estimate_encode_ttl(job),
+    )
+    process.onError(_onEncodeError)
+    process.onFault(_onEncodeFault)
+    process.onTimeout(_onEncodeTimeout)
+    process.onException(_onEncodeException)
+    process.start()
+    pid = process.pid
+    print(f'[TRACE:encode] started pid={pid} job={job.output_name}', file=sys.stderr, flush=True)
+
+
+WAIT/JOIN ALWAYS NEEDS A TIMEOUT
+----------------------------------
+
+Never call .wait(), .join(), or .communicate() without a timeout. Without a timeout they
+block forever if the child hangs.
+
+    # WRONG
+    process.wait()
+    thread.join()
+    stdout, stderr = proc.communicate()
+
+    # CORRECT
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        print('[WARN:encode] wait timed out — killed', file=sys.stderr, flush=True)
+
+    thread.join(timeout=10)
+    if thread.is_alive():
+        print('[WARN] thread still alive after join', file=sys.stderr, flush=True)
+
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+
+The lifecycle bypass detector flags all .wait()/.join()/.communicate() calls that have
+no timeout argument (positional or keyword).
+
+
+NO THREADS IN THE PARENT DEBUGGER
+-----------------------------------
+
+The parent start.py debugger must have zero threading.Thread() calls (other than the single
+approved heartbeat worker in debugger_surface.py which has # thread-ok).
+
+Every unit of blocking work that previously used a thread must be converted to:
+
+    1. A StartProcess — separate OS process launched via python start.py --worker-flag
+    2. Or an asyncio task — only for I/O-bound non-blocking work
+
+Fake process wrappers are worse than threads because they lie to the detector:
+
+    # LYING — this is a thread dressed up as a process
+    class ProcessJob:
+        def start(self):
+            threading.Thread(target=self.run).start()   # WRONG
+
+    # CORRECT — real OS process boundary
+    class FontInstallWorker:
+        def start(self, argv):
+            return StartProcess(
+                command=[sys.executable, str(Path(__file__).resolve()), '--font-worker', *argv],
+                name='TerminalFontWorker',
+                ttlSeconds=300.0,
+            ).start()
+
+
+WORKER PATTERN — HOW TO SPLIT BLOCKING WORK
+---------------------------------------------
+
+The canonical pattern for any blocking work:
+
+    In start.py:
+
+        # 1. Worker entry point
+        def runMyWorker(argv=None) -> int:
+            print(f'[TRACE:my-worker] started pid={os.getpid()}', file=sys.stderr, flush=True)
+            try:
+                do_the_blocking_work()
+                print('[TRACE:my-worker] complete', file=sys.stderr, flush=True)
+                return 0
+            except BaseException as error:
+                print(f'[FATAL:my-worker] {traceback.format_exc()}', file=sys.stderr, flush=True)
+                return 1
+
+        # 2. Worker request detection
+        MY_WORKER_FLAGS = buildCliAliasSet('my-worker', 'myworker')
+
+        def myWorkerRequested(argv=None) -> bool:
+            return bool(
+                cliHasAnyFlag(list(argv or []), MY_WORKER_FLAGS)
+                or os.environ.get('MY_WORKER', '').strip().lower() in {'1', 'true', 'yes'}
+            )
+
+        # 3. Lifecycle phase that launches the worker
+        def myWorkerPhase(self):
+            env = os.environ.copy()
+            env['MY_WORKER'] = '1'
+            process = StartProcess(
+                command=[sys.executable, str(Path(__file__).resolve()), '--my-worker', *self.argv],
+                name='MyWorker',
+                ttlSeconds=120.0,
+                cwd=str(BASE_DIR),
+                env=env,
+            )
+            process.onTimeout(lambda p: print('[WARN:my-worker] TTL expired', file=sys.stderr, flush=True))
+            process.onError(lambda p: print(f'[WARN:my-worker] error exit={p.returnCode}', file=sys.stderr, flush=True))
+            self.startExistingProcessPhase(process)
+            pid = process.pid
+            print(f'[TRACE:my-worker] worker started pid={pid}', file=sys.stderr, flush=True)
+            # Optionally wait with timeout
+            try:
+                process.wait(timeout=110)
+            except Exception:
+                pass
+            return True
+
+        # 4. In the main() short-circuit, route the worker entry
+        if myWorkerRequested(argv):
+            return int(runMyWorker(argv))
+
+        # 5. In the phase manifest
+        PHASE_MANIFEST = tuple(startPhaseSpec(key, method) for key, method in parsePipeSpecRows('''
+        ...
+        parent-bootstrap-my-work|myWorkerPhase
+        ...
+        '''))
+
+    In gtp.py / AppLifeCycle controller (for app-side work):
+
+        phase = LifeCyclePhase(
+            key='my-work',
+            callback=self._doMyWork,
+            label='My Work',
+            on_error=self._onMyWorkError,
+            on_fault=self._onMyWorkFault,
+            on_exception=self._onMyWorkException,
+            timeout_seconds=120.0,
+            ttl_seconds=120.0,
+        )
+        self.lifecycle.register_phase(phase)
+
+
+ELEVATION (UAC) RULE
+---------------------
+
+UAC prompts must ONLY happen inside a dedicated worker subprocess launched by the lifecycle.
+Never in the parent launcher, never in bootstrapRuntimePathsPhase, never inline in main().
+
+    # WRONG — blocks the parent on an invisible UAC dialog
+    def maybeRecommendConsoleFont(argv):
+        for spec in _fontInstallAttemptSpecs(font_path):
+            spec['runner']()   # calls _attemptWindowsElevatedFontInstallAndSwitch inline
+
+    # CORRECT — elevation only inside the font worker process
+    def _fontInstallAttemptSpecs(font_path):
+        in_font_worker = os.environ.get('FONT_WORKER', '').strip().lower() in {'1','true'}
+        specs = []
+        if in_font_worker:
+            specs.append({'key': 'elevated', 'runner': lambda: _attemptElevatedInstall(font_path)})
+        specs.append({'key': 'user', 'runner': lambda: _installFontForCurrentUser(font_path)})
+        return specs
+
+The pattern: set an environment variable before launching the worker subprocess. Check that
+variable inside the function that does the dangerous work. This ensures the dangerous code
+only runs when the parent has already isolated it in a child process.
+
+
+BLOCKING NETWORK CALLS
+-----------------------
+
+Any function that makes HTTP requests (requests.get, httpx.get, openai client calls, etc.)
+must run inside a worker process or have an explicit timeout.
+
+    # WRONG — hangs if server is down
+    response = requests.get('http://localhost:11434/api/tags')
+
+    # CORRECT
+    response = requests.get('http://localhost:11434/api/tags', timeout=10)
+
+    # BEST — in a worker process with TTL
+    # parent: launch modelCatalogWorkerPhase (ttl=60)
+    # worker: catalog.loadLatestDeployableVersions(allowNetwork=True)
+    #         uses requests with timeout internally
+
+
+THE DETECTOR — lifecyclebypassdetector.py
+-----------------------------------------
+
+The lifecycle bypass detector scans all .py files under the project root (except vendor/,
+build/, dist/, logs/) and enforces five rules:
+
+Rule 1: DIRECT_SPAWN
+    Raw subprocess/threading/os.system calls outside approved wrapper functions.
+    Flagged when the call is not inside one of:
+        launcherRunCommand, launcherStartProcess, _early_run_command,
+        managedSubprocessRun, managedSubprocessPopen, StartProcess (class),
+        AppLifeCycle (class), taskkill_process, etc.
+
+Rule 2: NO_TTL
+    Phase(), StartProcess(), LifeCyclePhase() constructed without any of:
+        ttl=, ttlSeconds=, ttl_seconds=, timeout=, timeout_seconds=, timeoutSeconds=
+
+Rule 3: NO_PID
+    .start() called on a process-like variable (process, proc, worker, p, child, sp...)
+    with no .pid reference in the next 5 lines.
+
+Rule 4: BARE_SLEEP
+    time.sleep() at module scope (top-level code that blocks the interpreter on import).
+
+Rule 5: BLOCKING_NO_TIMEOUT
+    .wait(), .join(), or .communicate() called without a timeout argument.
+
+Run the detector:
+
+    python start.py --lifecycle-bypass
+    # or directly:
+    python vendor/claude/lifecyclebypassdetector.py --root . --output logs/lifecyclebypass.txt .
+
+Suppression markers (inline comment on or within 2 lines of the flagged line):
+    # lifecycle-bypass-ok   — approved raw spawn, document why
+    # ttl-ok                — ttl set elsewhere or not applicable
+    # pid-ok                — pid captured elsewhere
+    # sleep-ok              — intentional sleep
+    # block-ok              — blocking call with intentional no-timeout
+    # phase-ownership-ok    — pre-existing approved call site
+
+
+HOW TO FIX EACH FINDING TYPE
+------------------------------
+
+DIRECT_SPAWN findings:
+
+    CASE: build script / standalone tool (CPython-Build-and-Run-Script.py, rebuild_*.py)
+        These are not lifecycle-managed scripts. They run standalone.
+        Add # lifecycle-bypass-ok: standalone build script on the call site.
+
+    CASE: inside a class that IS a lifecycle wrapper (AppLifeCycle, StartProcess)
+        Add # lifecycle-ok to the line. The detector allowlists these classes but the
+        marker prevents future confusion.
+
+    CASE: inside an app class that is NOT a lifecycle wrapper
+        Convert to StartProcess. Example:
+
+            # BEFORE (classes/EncoderEngine.py)
+            self.process = subprocess.Popen(self.command, cwd=self.cwd, env=self.env)
+
+            # AFTER
+            self._startProcess = StartProcess(
+                command=self.command,
+                name=f'EncoderProcess:{self.job_id}',
+                ttlSeconds=self.estimated_ttl,
+                cwd=self.cwd,
+                env=self.env,
+            )
+            self._startProcess.onError(self._onProcessError)
+            self._startProcess.onTimeout(self._onProcessTimeout)
+            self._startProcess.start()
+            self.pid = self._startProcess.pid
+
+    CASE: QThread in a Qt widget
+        QThread inside a widget is acceptable if it's a short-lived I/O helper.
+        Add # lifecycle-bypass-ok: Qt UI thread — short-lived, no blocking install/probe
+        If it's long-running or does blocking work, move it to a StartProcess worker.
+
+NO_TTL findings:
+
+    Always add the ttl parameter. Use the table above for guidance.
+
+    If the Phase/Process is genuinely instantaneous (e.g. reads a config file),
+    use ttl=10.0 and add a comment.
+
+    If the ttl is set on a parent object and passed down:
+        Add # ttl-ok: ttl set by caller to suppress the finding.
+
+NO_PID findings:
+
+    Add pid capture after every .start() call.
+
+    If the process object is stored on self and pid is read later:
+        process.start()
+        self.process = process
+        # pid-ok: pid available via self.process.pid
+
+    If the return value of start() IS the process:
+        proc = process.start()
+        pid = proc.pid
+
+BLOCKING_NO_TIMEOUT findings:
+
+    Always add a timeout. Every .wait(), .join(), .communicate() needs one.
+
+    For .wait() inside a lifecycle phase:
+        try:
+            process.wait(timeout=max(5, ttl - 10))
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    For threading.Event.wait() (like consoleWake.wait()):
+        Add a polling timeout: self.consoleWake.wait(timeout=1.0)
+        The event loop should re-check stop conditions at each timeout.
+
+    For .join() on a worker thread at shutdown:
+        thread.join(timeout=3.0)
+        if thread.is_alive():
+            print(f'[WARN:shutdown] {thread.name} still alive', file=sys.stderr, flush=True)
+
+
+COMPLETE WORKED EXAMPLE — Export Worker
+-----------------------------------------
+
+This shows the full pattern: phase registration, process launch, pid capture,
+TTL, error/timeout handling, and DB persistence.
+
+    # In classes/AppLifeCycle.py or a lifecycle controller:
+
+    class ExportLifecycleController:
+
+        def register_export_phases(self, job: ExportJob) -> None:
+            self.lifecycle.register_phase(LifeCyclePhase(
+                key=f'export-encode:{job.id}',
+                callback=lambda: self._launch_export_worker(job),
+                label=f'Export Encode: {job.output_name}',
+                on_error=lambda p: self._on_export_error(p, job),
+                on_fault=lambda p: self._on_export_fault(p, job),
+                on_exception=lambda p: self._on_export_exception(p, job),
+                on_complete=lambda p: self._on_export_complete(p, job),
+                timeout_seconds=self._estimate_encode_ttl(job),
+                ttl_seconds=self._estimate_encode_ttl(job) + 30,
+            ))
+
+        def _launch_export_worker(self, job: ExportJob) -> bool:
+            env = os.environ.copy()
+            env['EXPORT_WORKER'] = '1'
+            env['EXPORT_JOB_ID'] = str(job.id)
+            process = StartProcess(
+                command=[
+                    sys.executable,
+                    str(Path(__file__).resolve().parent.parent / 'start.py'),
+                    '--export-worker',
+                    '--job-id', str(job.id),
+                ],
+                name=f'ExportWorker:{job.id}',
+                ttlSeconds=self._estimate_encode_ttl(job) + 30,
+                cwd=str(_repo_root()),
+                env=env,
+            )
+            process.onError(lambda p: self._on_export_process_error(p, job))
+            process.onTimeout(lambda p: self._on_export_timeout(p, job))
+            process.onFault(lambda p: self._on_export_fault(p, job))
+            process.start()
+            pid = process.pid
+            print(
+                f'[TRACE:export] worker started pid={pid} job={job.id} output={job.output_name}',
+                file=sys.stderr, flush=True,
+            )
+            try:
+                process.wait(timeout=self._estimate_encode_ttl(job))
+            except Exception:
+                pass
+            return True
+
+        def _on_export_timeout(self, process, job: ExportJob) -> None:
+            pid = getattr(process, 'pid', 0) or 0
+            print(
+                f'[WARN:export] TTL expired pid={pid} job={job.id} — killing',
+                file=sys.stderr, flush=True,
+            )
+            job.status = 'timeout'
+            job.error = f'TTL expired after {process.ttlSeconds}s'
+
+        def _on_export_error(self, process, job: ExportJob) -> None:
+            rc = getattr(process, 'returnCode', None)
+            print(
+                f'[WARN:export] error exit={rc} job={job.id}',
+                file=sys.stderr, flush=True,
+            )
+            job.status = 'error'
+
+        def _estimate_encode_ttl(self, job: ExportJob) -> float:
+            # Rough estimate: 2 seconds per second of timeline + 60s buffer
+            duration = float(getattr(job, 'duration_seconds', 0.0) or 0.0)
+            return max(60.0, duration * 2 + 60)
+
+
+COMPLETE WORKED EXAMPLE — Headless Mode
+-----------------------------------------
+
+Per the whitepaper from the previous bot:
+
+    # WRONG — headless is a fake half-app
+    def headlessMain():
+        doTinySqlTest()
+        constructHalfApp()
+        return 0
+
+    # CORRECT — headless runs the real lifecycle, skips Qt phases
+    def main():
+        lifecycle = AppLifeCycleController(headless=args.headless)
+        lifecycle.register_phases([
+            LifeCyclePhase(
+                key='db-connect',
+                callback=self._connectDb,
+                timeout_seconds=10.0,
+                ttl_seconds=10.0,
+            ),
+            LifeCyclePhase(
+                key='qt-init',
+                callback=self._initQt,
+                timeout_seconds=30.0,
+                ttl_seconds=30.0,
+                metadata={'includesQT': True, 'canRunHeadless': False},
+            ),
+            LifeCyclePhase(
+                key='show-window',
+                callback=self._showMainWindow,
+                timeout_seconds=15.0,
+                ttl_seconds=15.0,
+                metadata={'includesQT': True, 'canRunHeadless': False},
+            ),
+        ])
+        return lifecycle.run()
+
+    # Inside AppLifeCycleController.run():
+    for phase in self.phases:
+        if self.headless and not phase.metadata.get('canRunHeadless', True):
+            print(f'[HEADLESS] skipping {phase.key} includesQT={phase.metadata.get("includesQT")}')
+            continue
+        self._run_phase(phase)
+
+
+READING THE DETECTOR REPORT
+-----------------------------
+
+The detector writes logs/lifecyclebypass.txt. Run it with:
+
+    python start.py --lifecycle-bypass
+
+The report groups findings by rule:
+
+    DIRECT_SPAWN — raw spawns that need lifecycle wrapping or suppression markers
+    NO_TTL       — constructors missing ttl
+    NO_PID       — .start() with no pid capture
+    BLOCKING_NO_TIMEOUT — .wait()/.join()/.communicate() without timeout
+
+For each finding:
+
+    file.py:lineno: RULE_NAME ClassName.method_name: source line
+
+Priority order:
+    1. Fix NO_TTL and NO_PID first — these are silent hang risks
+    2. Fix DIRECT_SPAWN for app code (ignore build scripts with the marker)
+    3. Fix BLOCKING_NO_TIMEOUT for anything in the parent debugger path
+    4. BLOCKING_NO_TIMEOUT in build scripts is lower priority
+
+
+CHECKLIST BEFORE HANDOFF
+--------------------------
+
+Before declaring work complete on any session that touches process/thread/phase code:
+
+[ ] python start.py --lifecycle-bypass shows 0 NEW findings (existing marked ones OK)
+[ ] python start.py --threads shows 0 Thread/Process findings
+[ ] Every StartProcess() has ttlSeconds= set
+[ ] Every StartProcess().start() is followed by pid = process.pid within 5 lines
+[ ] Every .wait()/.join()/.communicate() has a timeout= argument
+[ ] No threading.Thread() in start.py outside debugger_surface.py
+[ ] No elevation (UAC/RunAs) outside the font worker subprocess
+[ ] No time.sleep() at module scope
+[ ] No blocking HTTP calls without timeout=
+
+End of whitepaper.

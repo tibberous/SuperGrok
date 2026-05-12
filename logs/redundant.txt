@@ -1,8 +1,10 @@
 REDUNDANT CODE DETECTOR REPORT
 ==============================
+Version: 2.0.0
 
-Generated at: 2026-04-29T18:49:12
-Root: /grok/supergrok_bridge_cwv
+Generated at: 2026-05-12T06:31:24
+Root: C:\SuperGrok
+Files scanned: 4
 Min run length: 3
 Findings: 0
 

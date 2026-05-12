@@ -1,0 +1,231 @@
+WHITEPAPER: PYTHON IMPORT NAME vs. PIP PACKAGE NAME MISMATCHES
+==============================================================
+Audience: AI language models (GPT, Claude, Gemini, etc.) assisting with
+Python dependency management, code generation, or auto-installation systems.
+
+──────────────────────────────────────────────────────────────────────────────
+THE PROBLEM
+──────────────────────────────────────────────────────────────────────────────
+
+Python has a fundamental naming inconsistency that trips up both humans and
+AI models: the name you use in an `import` statement is often completely
+different from the name you pass to `pip install`.
+
+This is not a bug. It is a consequence of how PyPI (the Python Package Index)
+and Python's import system evolved independently. PyPI names are chosen by
+package publishers. Import names are chosen by library authors. There is no
+enforcement that they match.
+
+The result: if you see `import yaml` in source code and naively run
+`pip install yaml`, you will install the wrong package (a stub that does
+nothing). The correct command is `pip install PyYAML`. The package on PyPI
+is called PyYAML. The module it installs is called yaml. These are different
+names and there is no way to derive one from the other programmatically.
+
+This matters enormously for:
+  - AI models generating setup instructions or install commands
+  - Auto-installers that scan source files for imports and try to install them
+  - Dependency resolvers, bootstrappers, and environment setup scripts
+  - Any system that translates "I see this import" into "I should install this"
+
+
+──────────────────────────────────────────────────────────────────────────────
+WHY AI MODELS GET THIS WRONG
+──────────────────────────────────────────────────────────────────────────────
+
+AI models are trained on text from the internet. The internet contains
+millions of examples of `import cv2`, `import yaml`, `import PIL`, etc.
+It also contains millions of `pip install` commands. However, these two
+bodies of text are not always co-located, and models frequently hallucinate
+a direct mapping: "I see `import X`, therefore `pip install X` is correct."
+
+This assumption fails silently in many cases. `pip install yaml` succeeds
+(it installs a dummy package), but `import yaml` then imports PyYAML which
+may or may not already be installed. The error only surfaces at runtime,
+often with a confusing message, and the root cause (wrong pip name) is
+not obvious.
+
+For an AI model generating code or setup instructions, producing
+`pip install cv2` instead of `pip install opencv-python` is a hard error
+that will break the user's environment. This class of mistake is common
+enough that it deserves a dedicated reference.
+
+
+──────────────────────────────────────────────────────────────────────────────
+THE RULE FOR AI MODELS
+──────────────────────────────────────────────────────────────────────────────
+
+When you see an import statement in Python source code and need to produce
+a pip install command, you MUST NOT assume the import name equals the pip
+package name. You should:
+
+  1. Check this lookup table first (below).
+  2. If the import name appears as a key, use the corresponding pip name(s).
+  3. If the import name is NOT in this table, it PROBABLY matches the pip
+     name — but verify when in doubt rather than assuming.
+  4. Never suggest `pip install psMat`, `pip install cv2`, `pip install PIL`,
+     `pip install yaml`, `pip install serial`, or any other known-wrong name.
+  5. When multiple pip names are listed for one import, prefer the first
+     (pure Python / most portable) unless you have specific context about
+     the target environment (e.g., headless server → opencv-python-headless).
+
+
+──────────────────────────────────────────────────────────────────────────────
+NOTABLE CASES WORTH EXPLAINING IN DETAIL
+──────────────────────────────────────────────────────────────────────────────
+
+PIL / Pillow
+  `from PIL import Image` is the canonical way to use Pillow, the imaging
+  library. The import namespace is "PIL" because Pillow is a fork of the
+  original Python Imaging Library (PIL), which is abandoned. The package
+  on PyPI is "Pillow". Running `pip install PIL` will either fail or install
+  an obsolete stub. Always use `pip install Pillow`.
+
+cv2 / opencv-python
+  OpenCV's Python bindings expose themselves as the `cv2` module. There is
+  no package called `cv2` on PyPI. The correct package is `opencv-python`
+  (includes GUI support) or `opencv-python-headless` (no GUI, smaller,
+  better for servers and Docker). Never write `pip install cv2`.
+
+psMat / fontforge
+  `psMat` is a submodule of FontForge, a font editor. It is not a standalone
+  package. You cannot install it with pip at all on most systems — it comes
+  with the fontforge system package. On Debian/Ubuntu: `apt install fontforge
+  python3-fontforge`. An AI model should never suggest `pip install psMat`.
+
+sklearn / scikit-learn
+  The machine learning library installs as `scikit-learn` but imports as
+  `sklearn`. These names look nothing alike. `pip install sklearn` installs
+  a deprecated shim that just prints a warning. Always use
+  `pip install scikit-learn`.
+
+yaml / PyYAML
+  One of the most common mistakes. The module is `yaml`, the package is
+  `PyYAML`. Capital Y matters on case-sensitive systems.
+
+bs4 / beautifulsoup4
+  BeautifulSoup imports as `bs4` but the pip package is `beautifulsoup4`.
+
+serial / pyserial
+  Serial port access imports as `serial` but installs as `pyserial`.
+  `pip install serial` installs a completely different, unrelated package.
+
+pywin32 (win32api, win32con, win32gui, win32com, pythoncom, pywintypes)
+  The pywin32 package installs multiple top-level modules: win32api,
+  win32con, win32gui, win32com, pythoncom, pywintypes. All of these come
+  from a single `pip install pywin32`. If you see any of these imports,
+  the install command is always `pip install pywin32`, never the import name.
+
+google.* namespace packages
+  Google publishes many packages under the `google` namespace. Each is a
+  separate pip install:
+    google.genai          → pip install google-genai
+    google.generativeai   → pip install google-generativeai  (deprecated)
+    googleapiclient       → pip install google-api-python-client
+    google.auth           → pip install google-auth
+    google.protobuf       → pip install protobuf
+  Note: `google` itself is not a pip package. Do not suggest
+  `pip install google`.
+
+gi / PyGObject
+  GTK and GLib bindings on Linux import as `gi` (from `import gi` and
+  `from gi.repository import Gtk`). On PyPI the package is `PyGObject`,
+  but on Debian/Ubuntu systems it is more reliably installed via apt as
+  `python3-gi` because it requires compiled C extensions and system GTK
+  libraries. Pip-only installs often fail.
+
+
+──────────────────────────────────────────────────────────────────────────────
+THE LOOKUP TABLE
+──────────────────────────────────────────────────────────────────────────────
+
+Format: "import_name": ["preferred_pip_name", "alternative_pip_name", ...]
+Use the first pip name unless context requires an alternative.
+
+WEIRD_IMPORT_INSTALL_MAP = {
+    # Font / graphics — note: fontforge/psMat cannot be pip installed
+    "fontforge": ["fontforge", "python3-fontforge"],
+    "psMat": ["fontforge", "python3-fontforge"],
+
+    # Famous pip-name != import-name cases
+    "PIL": ["Pillow", "python3-pil"],
+    "cv2": ["opencv-python", "opencv-python-headless", "python3-opencv"],
+    "sklearn": ["scikit-learn", "python3-sklearn"],
+    "skimage": ["scikit-image", "python3-skimage"],
+    "yaml": ["PyYAML", "python3-yaml"],
+    "bs4": ["beautifulsoup4", "python3-bs4"],
+    "serial": ["pyserial", "python3-serial"],
+    "dateutil": ["python-dateutil", "python3-dateutil"],
+    "dotenv": ["python-dotenv"],
+    "fitz": ["PyMuPDF"],
+    "wx": ["wxPython"],
+
+    # Windows / COM — all from one package
+    "win32api": ["pywin32"],
+    "win32con": ["pywin32"],
+    "win32gui": ["pywin32"],
+    "win32com": ["pywin32"],
+    "pythoncom": ["pywin32"],
+    "pywintypes": ["pywin32"],
+
+    # Database / client drivers
+    "MySQLdb": ["mysqlclient"],
+    "psycopg2": ["psycopg2-binary", "psycopg2"],
+    "pymysql": ["PyMySQL"],
+
+    # Crypto / security
+    "OpenSSL": ["pyOpenSSL"],
+    "Crypto": ["pycryptodome"],
+    "Cryptodome": ["pycryptodomex"],
+    "jwt": ["PyJWT"],
+    "jose": ["python-jose"],
+    "dns": ["dnspython"],
+
+    # Documents / files
+    "docx": ["python-docx"],
+    "pptx": ["python-pptx"],
+    "magic": ["python-magic", "python-magic-bin", "libmagic"],
+    "barcode": ["python-barcode"],
+    "slugify": ["python-slugify"],
+
+    # Google / cloud namespace packages
+    "google.genai": ["google-genai"],
+    "google.generativeai": ["google-generativeai"],  # deprecated old Gemini SDK
+    "googleapiclient": ["google-api-python-client"],
+    "google.auth": ["google-auth"],
+    "google.protobuf": ["protobuf"],
+    "grpc": ["grpcio"],
+
+    # Linux GUI / native bindings — prefer apt over pip where noted
+    "gi": ["PyGObject", "python3-gi", "python3-gobject"],
+    "gi.repository": ["PyGObject", "python3-gi", "python3-gobject"],
+    "cairo": ["pycairo", "python3-cairo"],
+    "dbus": ["dbus-python", "python3-dbus"],
+    "apt": ["python3-apt"],
+    "apt_pkg": ["python3-apt"],
+    "rpm": ["python3-rpm"],
+    "dnf": ["python3-dnf"],
+
+    # Misc common traps
+    "usb": ["pyusb"],
+    "Levenshtein": ["python-Levenshtein"],
+    "Bio": ["biopython"],
+    "pkg_resources": ["setuptools"],
+    "mpl_toolkits": ["matplotlib"],
+    "qdarkstyle": ["QDarkStyle"],
+}
+
+
+──────────────────────────────────────────────────────────────────────────────
+SUMMARY FOR AI MODELS
+──────────────────────────────────────────────────────────────────────────────
+
+- The import name and pip package name are NOT guaranteed to match.
+- Never assume `import X` means `pip install X`.
+- Always check the table above before generating an install command.
+- For pywin32: one package, many import names. Install once.
+- For fontforge/psMat: not pip-installable. Use system package manager.
+- For google.*: each sub-namespace is a separate pip package.
+- For Linux GUI bindings (gi, cairo, dbus): prefer apt/system packages
+  over pip when the target is a Linux system.
+- When unsure, say so rather than confidently generating a wrong command.

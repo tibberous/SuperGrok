@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Detects runs of consecutive near-identical lines that should be a loop."""
 from __future__ import annotations
-import argparse, ast, datetime, os, re, sys
+import ast
+import datetime
+import os
+import re
+import sys
 from pathlib import Path
 
 _DETECTOR_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_DETECTOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_DETECTOR_ROOT))
 
+from vendor.claude.detector_base import Detector, Finding
 from vendor.claude.detector_runtime import InsertDebuggerException, tracedReadText, tracedWriteText
 
 MIN_RUN = 3
@@ -26,11 +31,8 @@ _KEYWORDS = {
     'getattr', 'setattr', 'async', 'await',
 }
 
-# Shapes that are always boring even if they repeat N times
-_SKIP_SHAPE_PREFIXES = (
-    'import <ID>',
-    'from <ID> import',
-)
+_SKIP_SHAPE_PREFIXES = ('import <ID>', 'from <ID> import')
+
 
 def _shape(line: str) -> str:
     s = line.strip()
@@ -48,10 +50,8 @@ def _shape(line: str) -> str:
 
 
 def _shape_is_interesting(shape: str) -> bool:
-    """Require the shape to have structural meat — a call, subscript, or attribute access."""
     if any(shape.startswith(p) for p in _SKIP_SHAPE_PREFIXES):
         return False
-    # Must contain a call, subscript, or attribute operator to be worth flagging.
     if 'mapped_column(' in shape or shape.startswith('from <ID>.<ID> import') or shape.startswith('from <ID> import'):
         return False
     static_prefixes = (
@@ -73,16 +73,11 @@ def _func_at(lines: list[str], idx: int) -> str:
     return '<module>'
 
 
-def scan(path: Path, min_run: int = MIN_RUN) -> list[tuple[int, int, int, str, str, str]]:
+def _scan_source(path: Path, source: str, min_run: int = MIN_RUN) -> list[tuple[int, int, int, str, str, str]]:
     """Return list of (start_line, end_line, match_count, func, shape, sample) for each run."""
     if path.name in {'vulture_whitelist.py', 'data.py'}:
         return []
-    try:
-        raw_lines = tracedReadText(path, encoding='utf-8', errors='replace').splitlines()
-    except Exception:
-        InsertDebuggerException("redundant.py:82", "handled exception")
-        return []
-
+    raw_lines = source.splitlines()
     shapes = [_shape(line) for line in raw_lines]
     findings = []
     i = 0
@@ -96,7 +91,6 @@ def scan(path: Path, min_run: int = MIN_RUN) -> list[tuple[int, int, int, str, s
             if shapes[j] == s:
                 j += 1
             elif not shapes[j] and j + 1 < len(shapes) and shapes[j + 1] == s:
-                # allow one blank line gap inside a run
                 j += 2
             else:
                 break
@@ -111,148 +105,88 @@ def scan(path: Path, min_run: int = MIN_RUN) -> list[tuple[int, int, int, str, s
     return findings
 
 
-SKIP_DIR_NAMES = {'.git', '__pycache__', '.mypy_cache', '.ruff_cache', 'node_modules', 'vendor'}
-
-
-def _resolve_import(module_name: str, from_file: Path, root: Path) -> Path | None:
-    parts = module_name.split('.')
-    for base in (from_file.parent, root):
-        candidate = base.joinpath(*parts).with_suffix('.py')
-        if candidate.exists():
-            resolved = candidate.resolve()
-            try:
-                resolved.relative_to(root)
-                return resolved
-            except ValueError:
-                InsertDebuggerException("redundant.py:125", "handled exception")
-                pass
-        pkg = base.joinpath(*parts) / '__init__.py'
-        if pkg.exists():
-            resolved = pkg.resolve()
-            try:
-                resolved.relative_to(root)
-                return resolved
-            except ValueError:
-                InsertDebuggerException("redundant.py:133", "handled exception")
-                pass
-    return None
-
-
-def _imports_from_ast(tree: ast.AST) -> list[str]:
-    names: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                names.append(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                names.append(node.module)
-    return names
-
-
-def iter_py(paths: list[Path], root: Path) -> list[Path]:
-    seen: set[Path] = set()
-    queue: list[Path] = []
-
-    def enqueue(p: Path) -> None:
-        p = p.resolve()
-        if p in seen or not p.exists():
-            return
-        try:
-            parts = p.relative_to(root).parts
-        except ValueError:
-            InsertDebuggerException("redundant.py:160", "handled exception")
-            return
-        if any(part in SKIP_DIR_NAMES for part in parts):
-            return
-        seen.add(p)
-        queue.append(p)
-
-    for raw in paths:
-        p = Path(raw).resolve()
-        if p.is_file() and p.suffix == '.py':
-            enqueue(p)
-        elif p.is_dir():
-            for child in p.rglob('*.py'):
-                enqueue(child)
-
-    out: list[Path] = []
-    while queue:
-        f = queue.pop(0)
-        out.append(f)
-        try:
-            source = tracedReadText(f, encoding='utf-8', errors='replace')
-            tree = ast.parse(source, filename=str(f))
-            for module_name in _imports_from_ast(tree):
-                resolved = _resolve_import(module_name, f, root)
-                if resolved:
-                    enqueue(resolved)
-        except Exception:
-            InsertDebuggerException("redundant.py:186", "handled exception")
-            pass
-
-    return out
-
-
 def _safe_print(text: str) -> None:
     enc = getattr(sys.stdout, 'encoding', 'utf-8') or 'utf-8'
     try:
         print(text)
     except UnicodeEncodeError:
-        InsertDebuggerException("redundant.py:196", "handled exception")
+        InsertDebuggerException("redundant.py:safe_print", "handled exception")
         print(text.encode(enc, errors='replace').decode(enc, errors='replace'))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description='Detect repetitive sequential lines that should be a loop.')
-    ap.add_argument('--root', default='.')
-    ap.add_argument('--output', required=True)
-    ap.add_argument('--min-run', type=int, default=MIN_RUN, help='Minimum consecutive matching lines to flag (default: 3)')
-    ap.add_argument('paths', nargs='*')
-    ns = ap.parse_args()
+class RedundantDetector(Detector):
+    NAME = 'redundant'
+    VERSION = '2.0.0'
+    REPORT_HEADER = 'REDUNDANT CODE DETECTOR REPORT'
+    DEFAULT_OUTPUT = 'logs/redundant.txt'
 
-    min_run = ns.min_run
-    root = Path(ns.root).resolve()
-    raw_paths = [Path(x).resolve() for x in ns.paths] if ns.paths else [root / 'start.py']
-    files = iter_py(raw_paths, root)
+    def __init__(self, min_run: int = MIN_RUN):
+        self.min_run = min_run
 
-    findings: list[tuple[Path, int, int, int, str, str, str]] = []
-    for f in files:
-        for start, end, count, func, shape, sample in scan(f, min_run=min_run):
-            findings.append((f, start, end, count, func, shape, sample))
+    def scan_file(self, path: Path, source: str, lines: list[str], tree: ast.AST, root: Path) -> list[Finding]:
+        findings = []
+        for start, end, count, func, shape, sample in _scan_source(path, source, self.min_run):
+            msg = f'({count} matching lines) [{func}] shape: {shape}'
+            findings.append(Finding(path, start, 0, 'MEDIUM', 'REDUNDANT_RUN', msg, sample))
+        return findings
 
-    # Worst offenders first
-    findings.sort(key=lambda x: -x[3])
+    def render_report(self, root: Path, files: list[Path], findings: list[Finding]) -> str:
+        lines_out = [
+            self.REPORT_HEADER,
+            '=' * len(self.REPORT_HEADER),
+            f'Version: {self.VERSION}',
+            '',
+            f'Generated at: {datetime.datetime.now().isoformat(timespec="seconds")}',
+            f'Root: {root}',
+            f'Files scanned: {len(files)}',
+            f'Min run length: {self.min_run}',
+            f'Findings: {len(findings)}',
+            '',
+        ]
+        # Sort worst offenders first (count is embedded in message — parse it)
+        def count_key(f: Finding) -> int:
+            try:
+                return -int(f.message.split('(')[1].split(' ')[0])
+            except Exception:
+                return 0
+        for f in sorted(findings, key=count_key):
+            lines_out.append(f.render(root))
+            if f.source:
+                lines_out.append(f'  first: {f.source}')
+            lines_out.append('')
+        if not findings:
+            lines_out.append('No repetitive line runs found.')
+        return '\n'.join(lines_out) + '\n'
 
-    out = Path(ns.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    def _run(self, argv=None):
+        import argparse
+        ap = argparse.ArgumentParser(description=self.REPORT_HEADER)
+        ap.add_argument('--root', default='.')
+        ap.add_argument('--output', default=self.DEFAULT_OUTPUT)
+        ap.add_argument('--min-run', type=int, default=MIN_RUN)
+        ap.add_argument('paths', nargs='*')
+        ns = ap.parse_args(list(argv) if argv is not None else None)
+        self.min_run = ns.min_run
 
-    report_lines = [
-        'REDUNDANT CODE DETECTOR REPORT',
-        '==============================',
-        '',
-        f'Generated at: {datetime.datetime.now().isoformat(timespec="seconds")}',
-        f'Root: {root}',
-        f'Files scanned: {len(files)}',
-        f'Min run length: {min_run}',
-        f'Findings: {len(findings)}',
-        '',
-    ]
-    for f, start, end, count, func, shape, sample in findings:
-        rel = os.path.relpath(f, root) if str(f).startswith(str(root)) else str(f)
-        report_lines.append(f'{rel}:{start}-{end}  ({count} matching lines)  [{func}]')  # noqa: redundant
-        report_lines.append(f'  shape: {shape}')  # noqa: redundant
-        report_lines.append(f'  first: {sample}')  # noqa: redundant
-        report_lines.append('')
-
-    if not findings:
-        report_lines.append('No repetitive line runs found.')
-
-    text = '\n'.join(report_lines) + '\n'
-    tracedWriteText(out, text, encoding='utf-8')
-    _safe_print(text)
-    return 1 if findings else 0
+        from vendor.claude.detector_base import discover_project_root, iter_py
+        discovered = discover_project_root()
+        root = Path(ns.root if ns.root != '.' else str(discovered)).resolve()
+        if ns.paths:
+            seeds = [Path(x).resolve() for x in ns.paths]
+        else:
+            default_seeds = [root / 'start.py', root / 'classes', root / 'data.py', root / 'trio.py']
+            seeds = [p for p in default_seeds if p.exists()] or [root]
+        files = iter_py(seeds, root)
+        findings = self.run_parallel(files, root)
+        report = self.render_report(root, files, findings)
+        out = Path(ns.output)
+        if not out.is_absolute():
+            out = root / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tracedWriteText(out, report, encoding='utf-8')
+        _safe_print(report)
+        return self._exit_code(findings)
 
 
 if __name__ == '__main__':
-    os._exit(int(main()))
+    RedundantDetector.main()

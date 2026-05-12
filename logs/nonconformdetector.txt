@@ -1,0 +1,77 @@
+NONCONFORMANCE DETECTOR REPORT
+==============================
+Version: 2.0.0
+
+Generated at: 2026-05-12T06:31:06
+Root: C:\SuperGrok
+Files scanned: 4
+pyphen available: True
+Prefix pollution findings: 0
+Banned construct findings: 0
+Inconsistent return findings: 0
+State exposure findings: 0
+Async misuse findings: 0
+Missing required symbols: 19
+Total findings: 19
+
+── MISSING REQUIRED SYMBOLS ──────────────────────────────────
+These canonical names were not found anywhere in the scanned files.
+A missing symbol may mean a rename silently dropped a core surface.
+
+  MISSING  InsertDebuggerException
+           DB fault insert — required on Database model
+
+  MISSING  StartProcess
+           Managed process wrapper in start.py
+
+  MISSING  StartPhase
+           Lifecycle phase wrapper in start.py
+
+  MISSING  StartDaemon
+           Daemon wrapper in start.py
+
+  MISSING  lifecycleSubprocessRun
+           Lifecycle-owned subprocess.run wrapper
+
+  MISSING  appLifeCycle
+           Application lifecycle controller instance
+
+  MISSING  ApplicationLifeCycleController
+           Main lifecycle controller class
+
+  MISSING  runQtBlockingCall
+           Qt main-thread marshalling wrapper
+
+  MISSING  Dependency
+           Single dependency descriptor
+
+  MISSING  Dependencies
+           Dependency collection manager
+
+  MISSING  DialogBase
+           Base class all dialogs must inherit
+
+  MISSING  BrowserLifecycleController
+           Qt browser lifecycle manager
+
+  MISSING  LocalizedWidget
+           Mixin for localized Qt widgets
+
+  MISSING  localize
+           Single localization entry point — replaces typed variants
+
+  MISSING  Thread
+           threading.Thread or wrapper
+
+  MISSING  Phase
+           Runtime Phase class in classes/
+
+  MISSING  Process
+           Runtime Process class in classes/
+
+  MISSING  ormColumn
+           ORM column accessor helper
+
+  MISSING  Color
+           App color/theme class
+

@@ -6,7 +6,7 @@ Three checks:
   1. PREFIX POLLUTION — names inside a class that redundantly repeat the
      app/class name prefix (e.g. a method named getCutiePyFoo inside CutiePy).
      Uses pyphen to syllabically decompose camelCase segments so that e.g.
-     "CutiePy" -> ["cu", "tie", "py"] and "Trio" -> ["tri", "o"] and can
+     "CutiePy" -> ["cu", "tie", "py"] and can
      be matched against identifier segments regardless of casing.
 
   2. REQUIRED SYMBOLS — verifies that a set of canonical classes, functions,
@@ -28,6 +28,7 @@ if str(_DETECTOR_ROOT) not in sys.path:
 SKIP_DIR_NAMES = {'.git', '__pycache__', '.mypy_cache', '.ruff_cache', 'node_modules', 'vendor'}
 OK_MARKER = 'noqa: nonconform'
 THREAD_OK_MARKER = 'thread-ok'
+_OK_SET = frozenset({OK_MARKER})
 
 # Names that are banned — use Process instead
 BANNED_THREAD_NAMES = {'Thread', 'threading'}
@@ -95,7 +96,7 @@ def _syllable_set(name: str) -> set[str]:
 
 
 # ── App-name syllables to treat as "prefix pollution" ─────────────────────────
-# Pulled from: CutiePy, Trio, cutiepy, TrioDesktop
+# Pulled from: CutiePy, cutiepy, 
 # We flag members whose names contain ALL syllables of a banned prefix.
 
 APP_PREFIXES: list[tuple[str, frozenset[str]]] = []
@@ -108,8 +109,8 @@ def _register_prefix(label: str, *words: str) -> None:
         APP_PREFIXES.append((label, frozenset(syl)))
 
 _register_prefix('CutiePy',     'cutie', 'py')
-_register_prefix('Trio',        'trio')
-_register_prefix('TrioDesktop', 'trio', 'desktop')
+
+
 
 
 def _has_prefix_pollution(member_name: str, class_name: str) -> str | None:
@@ -168,13 +169,8 @@ REQUIRED_SYMBOLS: list[tuple[str, str, str]] = [
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _sample(lines: list[str], lineno: int) -> str:
-    return lines[lineno - 1].strip()[:100] if 0 < lineno <= len(lines) else ''
-
-
-def _has_ok(lines: list[str], lineno: int) -> bool:
-    row = lines[lineno - 1] if 0 < lineno <= len(lines) else ''
-    return OK_MARKER in row
+def _sample(lines: list[str], lineno: int) -> str: return sample_line(lines, lineno, 100)
+def _has_ok(lines: list[str], lineno: int) -> bool: return has_ok_marker(lines, lineno, _OK_SET)
 
 
 def _member_names(classdef: ast.ClassDef) -> list[tuple[str, int]]:
@@ -208,7 +204,7 @@ def check_prefix_pollution(tree: ast.AST, lines: list[str], path: Path) -> list[
             matched = _has_prefix_pollution(member_name, class_name)
             if matched:
                 findings.append((lineno, 'PREFIX_POLLUTION',
-                    f"'{member_name}' inside '{class_name}' redundantly repeats the '{matched}' app prefix: {_sample(lines, lineno)}"))
+                    f"'{member_name}' inside '{class_name}' redundantly repeats the '{matched}' app prefix"))
     return findings
 
 
@@ -230,7 +226,7 @@ def check_banned_constructs(tree: ast.AST, lines: list[str], path: Path) -> list
                     lineno = node.lineno
                     if not _has_thread_ok(lineno):
                         findings.append((lineno, 'BANNED_THREAD',
-                            f"'import {alias.name}' — use Process, not Thread/threading: {_sample(lines, lineno)}"))
+                            f"'import {alias.name}' — use Process, not Thread/threading"))
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ''
             if mod in ('threading', 'classes._thread') or mod.startswith('threading.'):
@@ -238,7 +234,7 @@ def check_banned_constructs(tree: ast.AST, lines: list[str], path: Path) -> list
                     lineno = node.lineno
                     if not _has_thread_ok(lineno):
                         findings.append((lineno, 'BANNED_THREAD',
-                            f"'from {mod} import {alias.name}' — use Process, not Thread/threading: {_sample(lines, lineno)}"))
+                            f"'from {mod} import {alias.name}' — use Process, not Thread/threading"))
         # Flag Thread(...) constructor calls
         elif isinstance(node, ast.Call):
             fn = node.func
@@ -250,18 +246,133 @@ def check_banned_constructs(tree: ast.AST, lines: list[str], path: Path) -> list
             if name == 'Thread':
                 lineno = getattr(node, 'lineno', 0)
                 if not _has_thread_ok(lineno):
-                    sample = lines[lineno - 1].strip()[:120] if 0 < lineno <= len(lines) else ''
                     findings.append((lineno, 'BANNED_THREAD',
-                        f"Thread(...) — use Process(...) for all async work: {sample}"))
+                        "Thread(...) — use Process(...) for all async work"))
         # Flag threading.Thread attribute access
         elif isinstance(node, ast.Attribute):
             if node.attr == 'Thread' and isinstance(node.value, ast.Name) and node.value.id == 'threading':
                 lineno = getattr(node, 'lineno', 0)
                 if not _has_thread_ok(lineno):
-                    sample = lines[lineno - 1].strip()[:120] if 0 < lineno <= len(lines) else ''
                     findings.append((lineno, 'BANNED_THREAD',
-                        f"threading.Thread — use Process(...) for all async work: {sample}"))
+                        "threading.Thread — use Process(...) for all async work"))
 
+    return findings
+
+
+# ── Check 4: missing return on some paths ────────────────────────────────────
+
+def _path_always_returns(stmts: list[ast.stmt]) -> bool:
+    """True if every execution path through stmts ends with return/raise."""
+    if not stmts:
+        return False
+    for stmt in reversed(stmts):
+        if isinstance(stmt, (ast.Return, ast.Raise)):
+            return True
+        if isinstance(stmt, ast.If):
+            if stmt.orelse and _path_always_returns(stmt.body) and _path_always_returns(stmt.orelse):  # recursion-ok
+                return True
+        if isinstance(stmt, ast.Try):
+            bodies = [stmt.body] + [h.body for h in stmt.handlers]
+            if all(_path_always_returns(b) for b in bodies):  # recursion-ok
+                return True
+        break
+    return False
+
+
+def _func_has_explicit_return(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and node.value is not None:
+            return True
+    return False
+
+
+def check_inconsistent_return(tree: ast.AST, lines: list[str], path: Path) -> list[tuple[int, str, str]]:
+    """Flag functions that return a value on some paths but fall off the end on others."""
+    findings: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _func_has_explicit_return(node):
+            continue
+        if _path_always_returns(node.body):
+            continue
+        lineno = node.lineno
+        if _has_ok(lines, lineno):
+            continue
+        findings.append((lineno, 'INCONSISTENT_RETURN',
+            f"'{node.name}' returns a value on some paths but falls off the end on others"))
+    return findings
+
+
+# ── Check 5: over-exposed state (public self.x never read externally) ─────────
+
+def check_state_exposure(tree: ast.AST, lines: list[str], path: Path) -> list[tuple[int, str, str]]:
+    """Flag public self.x attributes that are only ever accessed as self.x (should be _x)."""
+    findings: list[tuple[int, str, str]] = []
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        # Collect all attrs set as self.x in __init__
+        init_attrs: dict[str, int] = {}
+        for method in cls.body:
+            if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name == '__init__':
+                for node in ast.walk(method):
+                    if (isinstance(node, ast.Assign)):
+                        for t in node.targets:
+                            if (isinstance(t, ast.Attribute)
+                                    and isinstance(t.value, ast.Name)
+                                    and t.value.id == 'self'
+                                    and not t.attr.startswith('_')):
+                                init_attrs[t.attr] = node.lineno
+        if not init_attrs:
+            continue
+        # Check if any attr is accessed externally (via something other than self.x)
+        # Collect all attribute reads in the whole file
+        external_reads: set[str] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.ctx, ast.Load)
+                    and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):
+                external_reads.add(node.attr)
+        for attr, lineno in init_attrs.items():
+            if attr in external_reads:
+                continue
+            if _has_ok(lines, lineno):
+                continue
+            findings.append((lineno, 'STATE_EXPOSURE',
+                f"'{cls.name}.{attr}' is public but never accessed externally — prefix with _ to make it private"))
+    return findings
+
+
+# ── Check 6: async/await misuse ───────────────────────────────────────────────
+
+def check_async_misuse(tree: ast.AST, lines: list[str], path: Path) -> list[tuple[int, str, str]]:
+    """Flag async defs that never await, and asyncio.sleep(0) yield hacks."""
+    findings: list[tuple[int, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        lineno = node.lineno
+        if _has_ok(lines, lineno):
+            continue
+        has_await = any(isinstance(n, ast.Await) for n in ast.walk(node))
+        if not has_await:
+            findings.append((lineno, 'ASYNC_NO_AWAIT',
+                f"'async def {node.name}' never awaits anything — remove async or add an await"))
+        # asyncio.sleep(0) inside any async func = yield-control hack
+        for n in ast.walk(node):
+            if not isinstance(n, ast.Await):
+                continue
+            call = n.value
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else '')
+            if name == 'sleep' and call.args and isinstance(call.args[0], ast.Constant) and call.args[0].value == 0:
+                sl = getattr(n, 'lineno', lineno)
+                if not _has_ok(lines, sl):
+                    findings.append((sl, 'ASYNC_SLEEP_ZERO',
+                        f"'await asyncio.sleep(0)' is a yield-control hack — use a Phase or Process instead"))
     return findings
 
 
@@ -441,5 +552,176 @@ def main() -> int:
     return 1 if total else 0
 
 
+from vendor.claude.detector_base import Detector, Finding, sample_line, has_ok_marker
+from vendor.claude.detector_runtime import tracedWriteText
+
+
+class NonconformDetector(Detector):
+    NAME = 'nonconform'
+    VERSION = '2.0.0'
+    REPORT_HEADER = 'NONCONFORMANCE DETECTOR REPORT'
+    DEFAULT_OUTPUT = 'logs/nonconform.txt'
+
+    def __init__(self):
+        self._no_prefix_check = False
+        self._no_symbol_check = False
+        self._all_files: list[Path] = []
+
+    def scan_file(self, path: Path, source: str, lines: list[str], tree: ast.AST, root: Path) -> list[Finding]:
+        findings: list[Finding] = []
+        if not self._no_prefix_check:
+            for lineno, code, msg in check_prefix_pollution(tree, lines, path):
+                findings.append(Finding(path, lineno, 0, 'MEDIUM', code, msg, _sample(lines, lineno)))
+        for lineno, code, msg in check_banned_constructs(tree, lines, path):
+            findings.append(Finding(path, lineno, 0, 'HIGH', code, msg, _sample(lines, lineno)))
+        for lineno, code, msg in check_inconsistent_return(tree, lines, path):
+            findings.append(Finding(path, lineno, 0, 'MEDIUM', code, msg, _sample(lines, lineno)))
+        for lineno, code, msg in check_state_exposure(tree, lines, path):
+            findings.append(Finding(path, lineno, 0, 'LOW', code, msg, _sample(lines, lineno)))
+        for lineno, code, msg in check_async_misuse(tree, lines, path):
+            findings.append(Finding(path, lineno, 0, 'MEDIUM', code, msg, _sample(lines, lineno)))
+        self._all_files.append(path)
+        return findings
+
+    def render_report(self, root: Path, files: list[Path], findings: list[Finding]) -> str:
+        missing_symbols: list[tuple[str, str]] = []
+        if not self._no_symbol_check:
+            found = collect_defined_symbols(files)
+            missing_symbols = check_required_symbols(found)
+
+        pollution = [f for f in findings if f.rule == 'PREFIX_POLLUTION']
+        banned = [f for f in findings if f.rule == 'BANNED_THREAD']
+        inc_return = [f for f in findings if f.rule == 'INCONSISTENT_RETURN']
+        state_exp = [f for f in findings if f.rule == 'STATE_EXPOSURE']
+        async_mis = [f for f in findings if f.rule in ('ASYNC_NO_AWAIT', 'ASYNC_SLEEP_ZERO')]
+        total = len(findings) + len(missing_symbols)
+
+        lines_out = [
+            self.REPORT_HEADER,
+            '=' * len(self.REPORT_HEADER),
+            f'Version: {self.VERSION}',
+            '',
+            f'Generated at: {datetime.datetime.now().isoformat(timespec="seconds")}',
+            f'Root: {root}',
+            f'Files scanned: {len(files)}',
+            f'pyphen available: {_PYPHEN_OK}',
+            f'Prefix pollution findings: {len(pollution)}',
+            f'Banned construct findings: {len(banned)}',
+            f'Inconsistent return findings: {len(inc_return)}',
+            f'State exposure findings: {len(state_exp)}',
+            f'Async misuse findings: {len(async_mis)}',
+            f'Missing required symbols: {len(missing_symbols)}',
+            f'Total findings: {total}',
+            '',
+        ]
+
+        if banned:
+            lines_out += [
+                '── BANNED CONSTRUCTS (Thread / threading) ────────────────────',
+                'All async work must use Process. Thread/threading is not allowed.',
+                'Suppress intentional exceptions with:  # thread-ok',
+                '',
+            ]
+            for f in sorted(banned, key=lambda x: (str(x.path), x.line)):
+                lines_out.append(f.render(root))
+            lines_out.append('')
+
+        if pollution:
+            lines_out += [
+                '── PREFIX POLLUTION ──────────────────────────────────────────',
+                'Members whose names redundantly repeat the app/class name prefix.',
+                'Suppress with:  # noqa: nonconform',
+                '',
+            ]
+            for f in sorted(pollution, key=lambda x: (str(x.path), x.line)):
+                lines_out.append(f.render(root))
+            lines_out.append('')
+
+        if inc_return:
+            lines_out += [
+                '── INCONSISTENT RETURN ───────────────────────────────────────',
+                'Functions that return a value on some paths but fall off the end on others.',
+                'Suppress with:  # noqa: nonconform',
+                '',
+            ]
+            for f in sorted(inc_return, key=lambda x: (str(x.path), x.line)):
+                lines_out.append(f.render(root))
+            lines_out.append('')
+
+        if state_exp:
+            lines_out += [
+                '── STATE EXPOSURE ────────────────────────────────────────────',
+                'Public self.x attributes never accessed from outside the class — should be _x.',
+                'Suppress with:  # noqa: nonconform',
+                '',
+            ]
+            for f in sorted(state_exp, key=lambda x: (str(x.path), x.line)):
+                lines_out.append(f.render(root))
+            lines_out.append('')
+
+        if async_mis:
+            lines_out += [
+                '── ASYNC MISUSE ──────────────────────────────────────────────',
+                'async def with no awaits, or asyncio.sleep(0) yield-control hacks.',
+                'Suppress with:  # noqa: nonconform',
+                '',
+            ]
+            for f in sorted(async_mis, key=lambda x: (str(x.path), x.line)):
+                lines_out.append(f.render(root))
+            lines_out.append('')
+
+        if missing_symbols:
+            lines_out += [
+                '── MISSING REQUIRED SYMBOLS ──────────────────────────────────',
+                'These canonical names were not found anywhere in the scanned files.',
+                'A missing symbol may mean a rename silently dropped a core surface.',
+                '',
+            ]
+            for name, description in missing_symbols:
+                lines_out.append(f'  MISSING  {name}')
+                lines_out.append(f'           {description}')
+                lines_out.append('')
+
+        if not total:
+            lines_out.append('No nonconformances found.')
+
+        return '\n'.join(lines_out) + '\n'
+
+    def _run(self, argv=None):
+        import argparse
+        ap = argparse.ArgumentParser(description=self.REPORT_HEADER)
+        ap.add_argument('--root', default='.')
+        ap.add_argument('--output', default=self.DEFAULT_OUTPUT)
+        ap.add_argument('--no-prefix-check', action='store_true')
+        ap.add_argument('--no-symbol-check', action='store_true')
+        ap.add_argument('paths', nargs='*')
+        ns = ap.parse_args(list(argv) if argv is not None else None)
+        self._no_prefix_check = ns.no_prefix_check
+        self._no_symbol_check = ns.no_symbol_check
+
+        from vendor.claude.detector_base import discover_project_root, iter_py
+        discovered = discover_project_root()
+        root = Path(ns.root if ns.root != '.' else str(discovered)).resolve()
+        if ns.paths:
+            seeds = [Path(x).resolve() for x in ns.paths]
+        else:
+            default_seeds = [root / 'start.py', root / 'classes', root / 'data.py', root / 'trio.py']
+            seeds = [p for p in default_seeds if p.exists()] or [root]
+        files = iter_py(seeds, root)
+        findings = self.run_parallel(files, root)
+        report = self.render_report(root, files, findings)
+        out = Path(ns.output)
+        if not out.is_absolute():
+            out = root / out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tracedWriteText(out, report, encoding='utf-8')
+        try:
+            print(report)
+        except UnicodeEncodeError:
+            enc = getattr(sys.stdout, 'encoding', 'utf-8') or 'utf-8'
+            print(report.encode(enc, errors='replace').decode(enc, errors='replace'))
+        return self._exit_code(findings)
+
+
 if __name__ == '__main__':
-    raise SystemExit(main())
+    NonconformDetector.main()

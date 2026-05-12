@@ -135,6 +135,16 @@ def _snippet(source_lines: list[str], lineno: int, end_lineno: Optional[int] = N
     return ''.join(source_lines[start:stop]).rstrip()
 
 
+def _has_ok_marker(source_lines: list[str], lineno: int, end_lineno: Optional[int] = None) -> bool:
+    """Allow intentional low-level wiring marked with # monkeypatch-ok."""
+    if not source_lines:
+        return False
+    start = max(0, int(lineno or 1) - 2)
+    stop = min(len(source_lines), int(end_lineno or lineno or 1) + 1)
+    snippet = ''.join(source_lines[start:stop])
+    return 'monkeypatch-ok' in snippet
+
+
 # ---------------------------------------------------------------------------
 # Name tracking — what names in this file came from imports?
 # ---------------------------------------------------------------------------
@@ -216,6 +226,9 @@ def check_attr_assignment(
 
     for t in targets:
         if not isinstance(t, ast.Attribute):
+            continue
+        lineno, end_lineno = _node_src(node)
+        if _has_ok_marker(src, lineno, end_lineno):
             continue
         root = _attr_target_root(t)
         if root is None:
@@ -629,7 +642,11 @@ def analyze_file(path: str) -> list[Finding]:
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             check_funcdef_shadow(node, src_lines, imported, path, findings)
 
-    return [f for f in findings if f.line not in suppressed]
+    return [
+        f for f in findings
+        if f.line not in suppressed
+        and 'monkeypatch-ok' not in str(f.code or '').lower()
+    ]
 
 
 # ---------------------------------------------------------------------------

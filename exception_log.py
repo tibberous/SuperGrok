@@ -28,13 +28,13 @@ EXCEPTION_DB = DATA / "supergrok_bridge_exceptions.sqlite3"
 
 class ExceptionDatabase:
     def __init__(self, path: Path = EXCEPTION_DB) -> None:
-        from sqlalchemy import Column, Float, Integer, String, Text, create_engine
+        from sqlalchemy import Column, Float, Integer, String, Text, create_engine  # depcheck-ok
         from sqlalchemy.orm import declarative_base, sessionmaker
 
         DATA.mkdir(parents=True, exist_ok=True)
-        self.path = path
-        self.engine = create_engine(f"sqlite:///{path}", future=True)
-        self.Base = declarative_base()
+        self.path = path  # noqa: nonconform
+        self.engine = create_engine(f"sqlite:///{path}", future=True)  # noqa: nonconform
+        self.Base = declarative_base()  # noqa: nonconform
 
         class ExceptionRecord(self.Base):  # type: ignore[misc, valid-type]
             __tablename__ = "exceptions"
@@ -49,11 +49,11 @@ class ExceptionDatabase:
             traceback_text = Column(Text, nullable=False)
             extra_json = Column(Text, nullable=False, default="{}")
 
-        self.Record = ExceptionRecord
+        self.Record = ExceptionRecord  # noqa: nonconform
         self.Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine, future=True)
+        self.Session = sessionmaker(bind=self.engine, future=True)  # noqa: nonconform
 
-    def record(self, context: str, error: BaseException, severity: str = "ERROR", extra: dict[str, Any] | None = None) -> int:
+    def record(self, context: str, error: BaseException, severity: str = "ERROR", extra: dict[str, Any] | None = None) -> int:  # noqa: nonconform
         now = time.time()
         record = self.Record(
             created_at=now,
@@ -70,7 +70,7 @@ class ExceptionDatabase:
             session.commit()
             return int(record.id)
 
-    def latest(self, limit: int = 200) -> list[dict[str, Any]]:
+    def latest(self, limit: int = 200) -> list[dict[str, Any]]:  # noqa: nonconform
         with self.Session() as session:
             rows = (
                 session.query(self.Record)

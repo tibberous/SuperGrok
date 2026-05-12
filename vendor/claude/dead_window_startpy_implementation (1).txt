@@ -1,0 +1,866 @@
+Dead Window Monitor Implementation Plan For Chat 24.7 / FlatLine start.py
+==========================================================================
+
+Audience
+--------
+This paper is for GPT/codebot models editing Chat 24.7's current FlatLine-style `start.py`. It explains how to implement dead-window prevention and detection in the actual launcher shape currently used by the repo.
+
+This is not a general essay. It is a start.py patch guide with code.
+
+Current Project Shape
+---------------------
+The Chat 24.7 repo is expected to look like this:
+
+    /chat
+      start.py
+      config.ini
+      how_to_push.txt
+      site/
+      server/
+        server.mjs
+        operator_client.py
+        operator-client.ini
+        prisma/
+      sql/
+      drop/
+
+The current Windows workflow is:
+
+    python start.py
+
+or:
+
+    python start.py --watch
+
+The current explicit operator workflow should be:
+
+    python start.py --operator-client
+
+The current combined workflow, only when explicitly requested, should be:
+
+    python start.py --watch-client
+
+The project must not auto-open the operator GUI from plain watch mode. Plain watch is a deployer. The operator client is a GUI. Mixing those by default is what created multiple dead Python windows.
+
+Observed Failure Pattern
+------------------------
+A log showed this sequence:
+
+    Launching: ... python.exe C:\247ch.at\start.py
+    WATCH:START base=C:\247ch.at poll=2.0s ...
+
+A blank/dead Python window appeared around that point. That means something inside watch startup was spawning a child Python process. Earlier patches revealed common culprits:
+
+- operator client auto-start from watch mode;
+- Qt/PySide import probes launched as child Python processes;
+- pip install probes launched as child Python processes;
+- monitor PowerShell probe matching itself;
+- use of `STARTF_USESHOWWINDOW` hiding the wrong window;
+- `stdout=PIPE`/`stderr=PIPE` without active draining.
+
+Goal
+----
+Patch `start.py` so that:
+
+1. All prints go to `debug.log`.
+2. All subprocesses go through `start_piped_process()`.
+3. Child stdout/stderr are drained to `debug.log`.
+4. Windows console helper windows are suppressed with `CREATE_NO_WINDOW`.
+5. Qt GUI windows are not hidden with `SW_HIDE`.
+6. Plain watch mode never auto-starts the operator client.
+7. `--operator-client` starts exactly one operator client.
+8. A `DeadWindowMonitor` class snapshots Python processes and fails if a risky code path creates a new suspicious Python child.
+9. The monitor logs the opener line.
+10. The monitor does not detect its own PowerShell probe.
+
+Start.py Sections To Add Or Replace
+-----------------------------------
+The following implementation is written to be dropped into a FlatLine `start.py`. It assumes these imports are available near the top:
+
+```python
+from __future__ import annotations
+
+import argparse
+import configparser
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Optional
+```
+
+Section 1: Root Debug Tee
+-------------------------
+Place this near the top of `start.py`, before process launches.
+
+```python
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "config.ini"
+DEBUG_LOG_FILE = BASE_DIR / "debug.log"
+
+
+class _DebugTee:
+    def __init__(self, stream, log_path: Path, label: str):
+        self._stream = stream
+        self._log_path = Path(log_path)
+        self._label = str(label or "stdout")
+        self.encoding = getattr(stream, "encoding", None) or "utf-8"
+        self.errors = getattr(stream, "errors", None) or "replace"
+
+    def write(self, data):
+        text = str(data)
+        try:
+            self._stream.write(text)
+        except Exception:
+            pass
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8", errors="replace") as handle:
+                handle.write(text)
+        except Exception:
+            pass
+        return len(text)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        try:
+            return bool(self._stream.isatty())
+        except Exception:
+            return False
+
+    def fileno(self):
+        try:
+            return self._stream.fileno()
+        except Exception:
+            raise OSError("debug tee stream has no fileno")
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def install_debug_tee() -> None:
+    os.environ.setdefault("CHAT247_DEBUG_LOG", str(DEBUG_LOG_FILE))
+    if not isinstance(sys.stdout, _DebugTee):
+        sys.stdout = _DebugTee(sys.stdout, DEBUG_LOG_FILE, "stdout")
+    if not isinstance(sys.stderr, _DebugTee):
+        sys.stderr = _DebugTee(sys.stderr, DEBUG_LOG_FILE, "stderr")
+    print(f"[Chat247Deploy:INFO] DEBUG-TEE active log={DEBUG_LOG_FILE}", flush=True)
+
+
+install_debug_tee()
+```
+
+Section 2: Trace Wrapper
+------------------------
+Use the project's existing Trace if it has one. If not, use this minimal class.
+
+```python
+class Trace:
+    @staticmethod
+    def _line(level: str, message: str) -> None:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [Chat247Deploy:{level}] {message}", flush=True)
+
+    @classmethod
+    def info(cls, message: str) -> None:
+        cls._line("INFO", message)
+
+    @classmethod
+    def ok(cls, message: str) -> None:
+        cls._line("SUCCESS", message)
+
+    @classmethod
+    def warn(cls, message: str) -> None:
+        cls._line("WARN", message)
+
+    @classmethod
+    def fail(cls, message: str) -> None:
+        cls._line("FAILED", message)
+```
+
+Section 3: Config Defaults
+--------------------------
+Ensure `config.ini` defaults do not auto-launch the operator from watch mode.
+
+```python
+DEFAULT_CONFIG_TEXT = """
+[watch]
+poll_seconds = 2.0
+push_current_on_watch_start = true
+deploy_current_on_folder_change = true
+
+[push]
+hide_child_windows = true
+worker_count = 8
+push_mode = bundle
+remote_bundle_dir = /tmp/chat247_deploy
+
+[operator_client]
+auto_start_with_watch = false
+relay_url = http://72.60.31.144:2470
+operator_name = Trent
+admin_token =
+auto_install_pyside6 = true
+""".strip() + "\n"
+
+
+def ensure_config_exists() -> None:
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
+```
+
+Section 4: Windows Process Helpers
+----------------------------------
+Add this before any process launch functions.
+
+```python
+def as_bool(value: object, default: bool = False) -> bool:
+    text = str(value if value is not None else "").strip().lower()
+    if not text:
+        return bool(default)
+    return text in {"1", "true", "yes", "y", "on", "enabled"}
+
+
+def windows_creation_flags(hide_window: bool) -> int:
+    if os.name != "nt" or not hide_window:
+        return 0
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+
+
+def windows_startupinfo_for_console_probe(enable: bool):  # type: ignore[no-untyped-def]
+    """Use only for pure console probes, never for Qt GUI children by default."""
+    if os.name != "nt" or not enable:
+        return None
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+        startupinfo.wShowWindow = 0
+        return startupinfo
+    except Exception as error:
+        Trace.warn(f"STARTUPINFO:FAILED {type(error).__name__}: {error}")
+        return None
+```
+
+Section 5: Piped Process Runner
+-------------------------------
+Every child must use this. The key points are:
+
+- `stdin=DEVNULL`
+- `stderr=STDOUT`
+- `stdout=PIPE`
+- a reader thread drains stdout immediately
+- `CREATE_NO_WINDOW` suppresses helper consoles
+- no `SW_HIDE` for GUI children
+
+```python
+def subprocess_text_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("CHAT247_DEBUG_LOG", str(DEBUG_LOG_FILE))
+    if extra:
+        env.update({str(k): str(v) for k, v in extra.items()})
+    return env
+
+
+def stream_process_output(prefix: str, pipe) -> None:  # type: ignore[no-untyped-def]
+    if pipe is None:
+        return
+    try:
+        for line in pipe:
+            text = str(line).rstrip("\r\n")
+            if text:
+                Trace.info(f"{prefix} {text}")
+    except Exception as error:
+        Trace.warn(f"STREAM:{prefix}:FAILED {type(error).__name__}: {error}")
+
+
+def start_piped_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    prefix: str,
+    hide_window: bool = True,
+    gui_child: bool = False,
+    env: Optional[dict[str, str]] = None,
+    stdin=None,
+) -> subprocess.Popen[str]:
+    Trace.info(f"PROCESS:START prefix={prefix} cwd={cwd} command={' '.join(str(part) for part in command)}")
+    startupinfo = None
+    # Only force SW_HIDE for non-GUI console helpers if explicitly requested.
+    if hide_window and not gui_child and os.environ.get("CHAT247_FORCE_STARTUPINFO_HIDE") == "1":
+        startupinfo = windows_startupinfo_for_console_probe(True)
+    proc = subprocess.Popen(
+        [str(part) for part in command],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL if stdin is None else stdin,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=subprocess_text_env(env),
+        creationflags=windows_creation_flags(hide_window),
+        startupinfo=startupinfo,
+    )
+    Trace.ok(f"PROCESS:STARTED prefix={prefix} pid={proc.pid}")
+    threading.Thread(target=stream_process_output, args=(prefix, proc.stdout), daemon=True, name=f"stream:{prefix}").start()
+    return proc
+```
+
+Section 6: DeadWindowMonitor Class
+----------------------------------
+This version is adapted to the current Chat 24.7 `Trace` style. It is safe against the PowerShell self-detection false positive.
+
+```python
+@dataclass(frozen=True)
+class DeadWindowProcess:
+    pid: int
+    parent_pid: int
+    name: str
+    command_line: str
+
+    @classmethod
+    def from_row(cls, row: dict[str, object]) -> "DeadWindowProcess":
+        return cls(
+            pid=int(row.get("ProcessId") or 0),
+            parent_pid=int(row.get("ParentProcessId") or 0),
+            name=str(row.get("Name") or ""),
+            command_line=str(row.get("CommandLine") or ""),
+        )
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "ProcessId": self.pid,
+            "ParentProcessId": self.parent_pid,
+            "Name": self.name,
+            "CommandLine": self.command_line,
+        }
+
+
+class DeadWindowMonitor:
+    PYTHON_NAMES = {"python.exe", "pythonw.exe", "py.exe"}
+    KEYWORDS = ("operator_client", "start.py", "PySide6", "QtWebEngine", "chat247", "flatline")
+
+    def __init__(self, *, fail_env: str = "CHAT247_FAIL_ON_DEAD_WINDOW", default_fail: bool = True):
+        self.fail_env = fail_env
+        self.default_fail = bool(default_fail)
+        self.current_pid = os.getpid()
+
+    def snapshot(self) -> dict[int, DeadWindowProcess]:
+        if os.name != "nt":
+            return {}
+        ps = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -match '^(python|pythonw|py)\\.exe$' } | "
+            "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+        )
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                text=True,
+                capture_output=True,
+                timeout=8,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                creationflags=windows_creation_flags(True),
+                startupinfo=windows_startupinfo_for_console_probe(True),
+            )
+            raw = (completed.stdout or "").strip()
+            if not raw:
+                return {}
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                data = [data]
+            result: dict[int, DeadWindowProcess] = {}
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    row = DeadWindowProcess.from_row(item)
+                    if row.pid and row.name.lower() in self.PYTHON_NAMES:
+                        result[row.pid] = row
+            return result
+        except Exception as error:
+            Trace.warn(f"DEAD-WINDOW-MONITOR:SNAPSHOT-FAILED {type(error).__name__}: {error}")
+            return {}
+
+    def fail_enabled(self) -> bool:
+        return as_bool(os.environ.get(self.fail_env, "true" if self.default_fail else "false"), self.default_fail)
+
+    def suspicious_after(
+        self,
+        before: dict[int, DeadWindowProcess],
+        *,
+        allowed_pids: Iterable[int] = (),
+    ) -> list[DeadWindowProcess]:
+        allowed = {int(pid) for pid in allowed_pids if int(pid or 0) > 0}
+        after = self.snapshot()
+        suspicious: list[DeadWindowProcess] = []
+        for pid, row in after.items():
+            if pid in before or pid in allowed or pid == self.current_pid:
+                continue
+            command = row.command_line.lower()
+            if row.parent_pid == self.current_pid:
+                suspicious.append(row)
+                continue
+            if any(keyword.lower() in command for keyword in self.KEYWORDS):
+                suspicious.append(row)
+        return suspicious
+
+    def check_after(
+        self,
+        before: dict[int, DeadWindowProcess],
+        *,
+        source_line: str,
+        allowed_pids: Iterable[int] = (),
+        delay_seconds: float = 2.0,
+    ) -> None:
+        if os.name != "nt":
+            return
+        time.sleep(max(0.2, float(delay_seconds)))
+        suspicious = self.suspicious_after(before, allowed_pids=allowed_pids)
+        if not suspicious:
+            Trace.info(f"DEAD-WINDOW-MONITOR:OK opener={source_line}")
+            return
+        Trace.fail(f"DEAD-WINDOW-MONITOR:DETECTED count={len(suspicious)} opener={source_line}")
+        for row in suspicious:
+            Trace.fail("DEAD-WINDOW-MONITOR:PROCESS " + json.dumps(row.to_json(), sort_keys=True, ensure_ascii=False))
+        if self.fail_enabled():
+            Trace.fail(f"DEAD-WINDOW-MONITOR:EXIT opener={source_line}; set {self.fail_env}=0 to log-only")
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            os._exit(95)
+
+    def watch_after(
+        self,
+        before: dict[int, DeadWindowProcess],
+        *,
+        source_line: str,
+        allowed_pids: Iterable[int] = (),
+        delay_seconds: float = 2.0,
+    ) -> None:
+        def worker() -> None:
+            try:
+                self.check_after(
+                    before,
+                    source_line=source_line,
+                    allowed_pids=allowed_pids,
+                    delay_seconds=delay_seconds,
+                )
+            except BaseException as error:
+                # os._exit inside check_after does not return. This is only for logging unexpected detector failures.
+                Trace.warn(f"DEAD-WINDOW-MONITOR:FAILED {type(error).__name__}: {error}")
+
+        if os.name == "nt":
+            threading.Thread(target=worker, daemon=True, name="DeadWindowMonitor").start()
+
+
+DEAD_WINDOW_MONITOR = DeadWindowMonitor()
+```
+
+Section 7: Operator Client Singleton
+------------------------------------
+Add this near the operator launch code.
+
+```python
+_OPERATOR_CLIENT_LOCK = BASE_DIR / "operator-client.lock"
+_OPERATOR_CLIENT_PROCESS: Optional[subprocess.Popen[str]] = None
+
+
+def process_is_alive(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"],
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                creationflags=windows_creation_flags(True),
+                startupinfo=windows_startupinfo_for_console_probe(True),
+            )
+            return str(pid) in (completed.stdout or "")
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def existing_operator_client_pid() -> int:
+    try:
+        if _OPERATOR_CLIENT_LOCK.exists():
+            payload = json.loads(_OPERATOR_CLIENT_LOCK.read_text(encoding="utf-8"))
+            pid = int(payload.get("pid") or 0)
+            if pid and process_is_alive(pid):
+                Trace.info(f"OPERATOR-CLIENT:LOCK:ALIVE pid={pid}; not launching another client")
+                return pid
+            if pid:
+                Trace.info(f"OPERATOR-CLIENT:LOCK:STALE pid={pid}; removing")
+            _OPERATOR_CLIENT_LOCK.unlink(missing_ok=True)
+    except Exception as error:
+        Trace.warn(f"OPERATOR-CLIENT:LOCK:FAILED {type(error).__name__}: {error}")
+    return 0
+
+
+def write_operator_client_lock(pid: int, command: list[str]) -> None:
+    try:
+        payload = {
+            "pid": int(pid),
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "command": command,
+            "source": "start.py launch_operator_client",
+        }
+        _OPERATOR_CLIENT_LOCK.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except Exception as error:
+        Trace.warn(f"OPERATOR-CLIENT:LOCK:WRITE-FAILED {type(error).__name__}: {error}")
+```
+
+Section 8: Operator Client Config
+---------------------------------
+Read token and relay settings from `config.ini`. Do not invent a second token if one already exists.
+
+```python
+def operator_client_config() -> dict[str, str]:
+    parser = configparser.ConfigParser()
+    parser.read(CONFIG_FILE, encoding="utf-8")
+    server_ip = parser.get("push", "server_ip", fallback="72.60.31.144").strip() or "72.60.31.144"
+    return {
+        "relay_url": parser.get("operator_client", "relay_url", fallback=f"http://{server_ip}:2470").strip() or f"http://{server_ip}:2470",
+        "operator_name": parser.get("operator_client", "operator_name", fallback="Operator").strip() or "Operator",
+        "admin_token": (
+            parser.get("operator_client", "admin_token", fallback="").strip()
+            or parser.get("admin", "operator_token", fallback="").strip()
+        ),
+        "auto_install_pyside6": parser.get("operator_client", "auto_install_pyside6", fallback="true").strip(),
+        "auto_start_with_watch": parser.get("operator_client", "auto_start_with_watch", fallback="false").strip(),
+    }
+```
+
+Section 9: PySide6 Import / Install Policy
+------------------------------------------
+Do not launch `python -c "import PySide6"` just to test import. That can create a dead window. Check it in-process.
+
+```python
+def pyside6_available() -> bool:
+    try:
+        import PySide6  # noqa: F401
+        from PySide6 import QtWebEngineWidgets  # noqa: F401
+        return True
+    except Exception as error:
+        Trace.warn(f"OPERATOR-CLIENT:QT-IMPORT-MISSING {type(error).__name__}: {error}")
+        return False
+
+
+def ensure_pyside6_if_requested() -> bool:
+    cfg = operator_client_config()
+    if pyside6_available():
+        return True
+    if not as_bool(cfg.get("auto_install_pyside6"), True):
+        return False
+    # Hidden console helper, not a GUI child.
+    proc = start_piped_process(
+        [sys.executable, "-m", "pip", "install", "PySide6"],
+        cwd=BASE_DIR,
+        prefix="OPERATOR-CLIENT-QT-INSTALL",
+        hide_window=True,
+        gui_child=False,
+    )
+    code = proc.wait(timeout=900)
+    if int(code or 0) != 0:
+        Trace.fail(f"OPERATOR-CLIENT-QT-INSTALL:FAILED exit={code}")
+        return False
+    return pyside6_available()
+```
+
+Section 10: Launch Operator Client
+----------------------------------
+This is the critical piece. Use `gui_child=True`. Pass the launched pid to the monitor as allowed. Do not use SW_HIDE.
+
+```python
+def launch_operator_client(*, force: bool = False) -> int:
+    global _OPERATOR_CLIENT_PROCESS
+    if existing_operator_client_pid():
+        return 0
+    if not ensure_pyside6_if_requested():
+        Trace.fail("OPERATOR-CLIENT:QT unavailable; cannot launch")
+        return 2
+
+    cfg = operator_client_config()
+    client_path = BASE_DIR / "server" / "operator_client.py"
+    if not client_path.exists():
+        Trace.fail(f"OPERATOR-CLIENT:MISSING {client_path}")
+        return 2
+
+    command = [sys.executable, str(client_path)]
+    env = {
+        "CHAT247_RELAY_URL": cfg.get("relay_url", ""),
+        "CHAT247_OPERATOR_NAME": cfg.get("operator_name", "Operator"),
+        "CHAT247_ADMIN_TOKEN": cfg.get("admin_token", ""),
+        "CHAT247_DEBUG_LOG": str(DEBUG_LOG_FILE),
+    }
+    before = DEAD_WINDOW_MONITOR.snapshot()
+    proc = start_piped_process(
+        command,
+        cwd=BASE_DIR,
+        prefix="OPERATOR-CLIENT",
+        hide_window=True,
+        gui_child=True,
+        env=env,
+    )
+    _OPERATOR_CLIENT_PROCESS = proc
+    write_operator_client_lock(proc.pid, command)
+    DEAD_WINDOW_MONITOR.watch_after(
+        before,
+        source_line="launch_operator_client -> start_piped_process([sys.executable, server/operator_client.py])",
+        allowed_pids={proc.pid},
+        delay_seconds=2.0,
+    )
+    return 0
+```
+
+Section 11: Watch Mode Must Not Launch Client Unless Explicit
+-------------------------------------------------------------
+Patch argument parsing and main flow.
+
+```python
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--watch", action="store_true", help="Run deploy watcher")
+    parser.add_argument("--push", action="store_true", help="Push current site/server once")
+    parser.add_argument("--operator-client", action="store_true", help="Open local Qt WebEngine operator client")
+    parser.add_argument("--watch-client", action="store_true", help="Run watcher and intentionally open operator client")
+    parser.add_argument("--no-operator-client", action="store_true", help="Disable operator auto-start")
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    ensure_config_exists()
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.operator_client:
+        return launch_operator_client(force=True)
+
+    if args.watch_client:
+        launch_operator_client(force=True)
+        return run_watch_loop()
+
+    if args.push:
+        return run_push_current(reason="manual_push")
+
+    # Bare start.py and --watch are deploy/watch only. No GUI child.
+    return run_watch_loop()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+```
+
+If the existing `start.py` has auto-start logic like this:
+
+```python
+maybe_auto_start_operator_client(reason="watch_start")
+```
+
+remove it from plain watch. Only call it from `--watch-client`, and only if config explicitly allows it.
+
+Section 12: Watch Startup Dead Window Guard
+-------------------------------------------
+Around watch startup, snapshot before and after. This catches accidental child launches from future regressions.
+
+```python
+def run_watch_loop() -> int:
+    before = DEAD_WINDOW_MONITOR.snapshot()
+    Trace.ok(f"WATCH:START base={BASE_DIR} poll=2.0s startup_push=True folder_watch=True")
+    DEAD_WINDOW_MONITOR.watch_after(
+        before,
+        source_line="watch_loop startup after Trace WATCH:START",
+        allowed_pids={os.getpid()},
+        delay_seconds=3.0,
+    )
+    # Continue existing watch logic here.
+    while True:
+        try:
+            # scan drop folder / site / server changes
+            time.sleep(2.0)
+        except KeyboardInterrupt:
+            Trace.info("WATCH:STOP keyboard interrupt")
+            return 0
+```
+
+If this monitor trips immediately after `WATCH:START`, the bug is not the operator client. It means watch startup created a Python child from some other path. The log will show the opener line and process command.
+
+Section 13: Replace All Direct Subprocess Launches
+--------------------------------------------------
+Search the file:
+
+    grep -n "subprocess\.Popen\|subprocess\.run\|os\.system\|os\.popen" start.py
+
+Every launch should be reviewed. These replacements are typical.
+
+WinSCP bundle upload:
+
+```python
+proc = start_piped_process(
+    [winscp_path, f"/log={log_path}", "/loglevel=2", "/nointeractiveinput", f"/script={script_path}"],
+    cwd=BASE_DIR,
+    prefix="BUNDLE",
+    hide_window=True,
+    gui_child=False,
+)
+exit_code = proc.wait()
+```
+
+Node check:
+
+```python
+proc = start_piped_process(
+    ["npm", "run", "check"],
+    cwd=BASE_DIR / "server",
+    prefix="NPM-CHECK",
+    hide_window=True,
+    gui_child=False,
+)
+exit_code = proc.wait()
+```
+
+Remote command helpers:
+
+```python
+proc = start_piped_process(
+    [winscp_path, f"/script={script_path}"],
+    cwd=BASE_DIR,
+    prefix="REMOTE-CALL",
+    hide_window=True,
+    gui_child=False,
+)
+```
+
+PowerShell helper:
+
+```python
+completed = subprocess.run(
+    ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    capture_output=True,
+    text=True,
+    stdin=subprocess.DEVNULL,
+    creationflags=windows_creation_flags(True),
+    startupinfo=windows_startupinfo_for_console_probe(True),
+)
+```
+
+Direct `subprocess.run(..., capture_output=True)` is acceptable only for short bounded probes with timeout. It should still hide console windows and should not be used for long-running tools that may emit lots of output.
+
+Section 14: Auth/API Error Is Separate From Dead Windows
+--------------------------------------------------------
+If the GUI now opens but shows:
+
+    No users loaded. Check admin token and server logs.
+
+that is not a dead-window problem. That means the Qt client reached the GUI but did not receive valid users from the server.
+
+Server-side requirements:
+
+- Node route must exist: `/api/operator/get-users`.
+- Client must send `Authorization: Bearer <token>`.
+- Client must also send `X-Chat247-Admin-Token: <token>` for backward compatibility.
+- Server must read the same token from `config.ini`, `server/operator-client.ini`, or environment.
+- If route returns 404, client should retry because deployment/restart may still be in progress.
+- If route returns 401/403, show token mismatch with masked-token diagnostics.
+
+Do not confuse auth/API errors with dead windows. Fix dead windows first because they hide all other diagnostics. Then fix API auth.
+
+Section 15: Validation Commands
+-------------------------------
+After patching start.py, run:
+
+```bash
+python -m py_compile start.py
+python start.py --operator-client
+python start.py --watch
+```
+
+On Windows, also run:
+
+```powershell
+$env:CHAT247_FAIL_ON_DEAD_WINDOW="1"
+python start.py --watch
+```
+
+Expected:
+
+- no operator GUI opens from plain watch;
+- no blank Python child window appears;
+- log contains `DEAD-WINDOW-MONITOR:OK opener=watch_loop startup after Trace WATCH:START`;
+- `python start.py --operator-client` opens exactly one Qt GUI;
+- second `python start.py --operator-client` says lock alive and does not open another;
+- if a bad Python child launch is injected, start.py exits with code 95 and logs the opener.
+
+Section 16: Intentional Bad Test
+--------------------------------
+Add a temporary debug flag to prove the monitor works:
+
+```python
+if os.environ.get("CHAT247_TEST_DEAD_WINDOW") == "1":
+    before = DEAD_WINDOW_MONITOR.snapshot()
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    DEAD_WINDOW_MONITOR.check_after(before, source_line="intentional bad test")
+```
+
+Run:
+
+```powershell
+$env:CHAT247_TEST_DEAD_WINDOW="1"
+$env:CHAT247_FAIL_ON_DEAD_WINDOW="1"
+python start.py --watch
+```
+
+Expected:
+
+    DEAD-WINDOW-MONITOR:DETECTED count=1 opener=intentional bad test
+    DEAD-WINDOW-MONITOR:PROCESS {...}
+    DEAD-WINDOW-MONITOR:EXIT opener=intentional bad test; set CHAT247_FAIL_ON_DEAD_WINDOW=0 to log-only
+
+Remove the temporary test after validation.
+
+Section 17: Final Acceptance Criteria
+-------------------------------------
+A GPT model should not claim the dead-window fix is complete unless all of these are true:
+
+1. `start.py` compiles.
+2. Plain `python start.py` does not open any extra Python windows.
+3. `python start.py --watch` does not open the operator client.
+4. `python start.py --operator-client` opens exactly one visible Qt GUI.
+5. `python start.py --operator-client` a second time does not open another client.
+6. stdout/stderr from child tools are visible in `debug.log`.
+7. DeadWindowMonitor does not detect its own PowerShell probe.
+8. Intentional bad child test exits with code 95.
+9. Auth/API errors are displayed inside the GUI and logged, not hidden behind a blank window.
+10. The final handoff includes this whitepaper so the pattern can be reused in other FlatLine projects.
+

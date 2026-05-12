@@ -1,0 +1,8 @@
+==============================================================================
+MONKEY-PATCH DETECTION REPORT
+Root file     : C:/SuperGrok
+Files scanned : 8
+Findings      : 0  (HIGH=0  MEDIUM=0  LOW=0)
+
+No monkey-patches detected.
+==============================================================================

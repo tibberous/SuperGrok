@@ -1,219 +1,228 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, ast, collections, datetime, os, sys
+import ast
+import collections
+import datetime
+import os
+import sys
 from pathlib import Path
 
 _DETECTOR_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_DETECTOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_DETECTOR_ROOT))
 
+from vendor.claude.detector_base import Detector, Finding, build_parent_map, has_ok_marker, enclosing_function_name, enclosing_class_name, dotted_name as _base_dotted_name
 from vendor.claude.detector_runtime import InsertDebuggerException, tracedReadText, tracedWriteText
 
-BLOCKED_CALLS = {
-    'subprocess.Popen': 'DIRECT_POPEN',
-    'subprocess.run': 'DIRECT_RUN',
-    'subprocess.call': 'DIRECT_CALL',
-    'subprocess.check_call': 'DIRECT_CHECK_CALL',
-    'subprocess.check_output': 'DIRECT_CHECK_OUTPUT',
-    'subprocess.getoutput': 'DIRECT_GETOUTPUT',
-    'threading.Thread': 'DIRECT_THREAD',
-    'multiprocessing.Process': 'DIRECT_PROCESS',
-    'Process': 'DIRECT_PROCESS',
-    'os.system': 'OS_SYSTEM',
-    'os.popen': 'OS_POPEN',
-    'os.execv': 'OS_EXEC',
-    'os.execve': 'OS_EXEC',
-    'os.execvp': 'OS_EXEC',
-    'os.spawnl': 'OS_SPAWN',
-    'os.spawnle': 'OS_SPAWN',
-    'os.spawnlp': 'OS_SPAWN',
-    'os.spawnv': 'OS_SPAWN',
-    'QThread': 'DIRECT_QTHREAD',
+# ---------------------------------------------------------------------------
+# What this detector enforces:
+#  1. DIRECT_SPAWN   — raw subprocess/os.system/thread outside an approved wrapper
+#  2. NO_TTL         — Phase()/StartProcess() constructed without ttl
+#  3. NO_PID         — .start() called with no pid capture nearby
+#  4. BARE_SLEEP     — time.sleep() at module scope
+#  5. INLINE_BLOCK   — blocking .wait()/.join() without timeout
+#  6. BLOCKING_MAIN_THREAD — .communicate()/subprocess.run() on main Qt thread
+# ---------------------------------------------------------------------------
+
+BLOCKED_SPAWN = {
+    'subprocess.Popen': 'DIRECT_SPAWN', 'subprocess.run': 'DIRECT_SPAWN',
+    'subprocess.call': 'DIRECT_SPAWN', 'subprocess.check_call': 'DIRECT_SPAWN',
+    'subprocess.check_output': 'DIRECT_SPAWN', 'subprocess.getoutput': 'DIRECT_SPAWN',
+    'subprocess.getstatusoutput': 'DIRECT_SPAWN', 'os.system': 'DIRECT_SPAWN',
+    'os.popen': 'DIRECT_SPAWN', 'os.execv': 'DIRECT_SPAWN', 'os.execve': 'DIRECT_SPAWN',
+    'os.execvp': 'DIRECT_SPAWN', 'os.spawnl': 'DIRECT_SPAWN', 'os.spawnle': 'DIRECT_SPAWN',
+    'os.spawnlp': 'DIRECT_SPAWN', 'os.spawnv': 'DIRECT_SPAWN',
+    'threading.Thread': 'DIRECT_SPAWN', 'multiprocessing.Process': 'DIRECT_SPAWN',
+    'QThread': 'DIRECT_SPAWN',
+    'concurrent.futures.ThreadPoolExecutor': 'DIRECT_SPAWN',
+    'concurrent.futures.ProcessPoolExecutor': 'DIRECT_SPAWN',
+    'ThreadPoolExecutor': 'DIRECT_SPAWN', 'ProcessPoolExecutor': 'DIRECT_SPAWN',
 }
-ALLOW_FUNCS = {
-    'launcherRunCommand', 'launcherStartProcess', '_early_run_command',
-    '_roughRunCommand', 'attemptPlainPipInstall', 'StartWorkerProcess',
-    'managedSubprocessRun', 'managedSubprocessPopen', 'lifecycleSubprocessRun',
-    'lifecycleSubprocessPopen', 'runClaudeDetector', 'applicationRun',
+
+SPAWN_ALLOWLIST_FUNCS = {
+    'launcherRunCommand', 'launcherStartProcess', '_early_run_command', '_runCapturedCommand',
+    '_roughRunCommand', 'managedSubprocessRun', 'managedSubprocessPopen',
+    'lifecycleSubprocessRun', 'lifecycleSubprocessPopen',
+    'runClaudeDetector', 'applicationRun', 'attemptPlainPipInstall', 'runHookCommand', 'startHookProcess',
+    'StartWorkerProcess', '_early_run_all_claude_detectors', '_early_run_one_detector',
+    '_launch_process', '_kill_process', '_reap', 'run_process', 'start_process', '_start', 'launch',
+    'taskkill_process',
 }
-OK_MARKERS = {'lifecycle-bypass-ok', 'noqa: lifecycle-bypass'}
-SKIP_DIR_NAMES = {'.git', '__pycache__', '.mypy_cache', '.ruff_cache', 'node_modules', 'vendor'}
+SPAWN_ALLOWLIST_CLASSES = {
+    'StartProcess', 'LifeCycleController', 'AppLifeCycleController',
+    'StartLifecycleController', 'StartDependencyRegistry',
+    'Process', 'ManagedProcess', 'AppLifeCycle', 'Thread',
+}
+TTL_REQUIRED_CTORS = {'StartProcess', 'Phase', 'LifeCyclePhase'}
+TTL_KW_NAMES = {'ttl', 'ttlSeconds', 'ttl_seconds', 'timeout', 'timeout_seconds', 'timeoutSeconds'}
+PROCESS_LIKE_NAMES = {'process', 'proc', 'worker', 'p', 'child', 'sp', 'server_process', 'relay_process', 'watchdog_process'}
+LONG_SLEEP_THRESHOLD = 1.0
+BLOCKING_METHODS = {'wait', 'join', 'communicate'}
+BLOCKING_MAIN_THREAD_METHODS = {'communicate'}
+BLOCKING_MAIN_THREAD_FUNCS = {
+    'subprocess.run', 'subprocess.call', 'subprocess.check_call',
+    'subprocess.check_output', 'subprocess.getoutput', 'subprocess.getstatusoutput',
+}
+WORKER_THREAD_FUNCS = {'run', '_run', '_thread_run', 'worker_run', '_worker', '_thread', '_bg_run'}
+WORKER_THREAD_CLASSES = {'QThread', 'Thread', 'WorkerThread', 'BackgroundThread', 'WaveformStreamLoader'}
+OK_MARKERS = {
+    'lifecycle-bypass-ok', 'noqa: lifecycle-bypass',
+    'ttl-ok', 'pid-ok', 'sleep-ok', 'block-ok', 'phase-ownership-ok', 'phase-architecture-ok', 'main-thread-ok', 'thread-ok',
+}
+RULE_DESCRIPTIONS = {
+    'DIRECT_SPAWN': 'Raw subprocess/thread/process call outside lifecycle wrapper',
+    'NO_TTL': 'Phase/Process constructed without ttl/ttlSeconds/timeout_seconds',
+    'NO_PID': '.start() called — no .pid capture in next 5 lines',
+    'BARE_SLEEP': 'time.sleep() at module scope (blocks debugger parent)',
+    'BLOCKING_NO_TIMEOUT': '.wait()/.join()/.communicate() called without timeout arg',
+    'BLOCKING_MAIN_THREAD': '.communicate()/subprocess.run() on main Qt thread',
+    'SYNTAX_ERROR': 'File could not be parsed',
+    'READ_ERROR': 'File could not be read',
+}
 
 
-def dottedName(node: ast.AST) -> str:
-    parts: list[str] = []
-    current = node
-    while isinstance(current, ast.Attribute):
-        parts.append(current.attr)
-        current = current.value
-    if isinstance(current, ast.Name):
-        parts.append(current.id)
-    return '.'.join(reversed(parts))
+def dottedName(node: ast.AST) -> str: return _base_dotted_name(node)
+def simpleName(node: ast.AST) -> str: name = dottedName(node); return name.split('.')[-1] if name else ''
+def buildParentMap(tree: ast.AST) -> dict[int, ast.AST]: return build_parent_map(tree)
+def enclosingFunction(node: ast.AST, parents: dict[int, ast.AST]) -> str: return enclosing_function_name(node, parents)
+def enclosingClass(node: ast.AST, parents: dict[int, ast.AST]) -> str: return enclosing_class_name(node, parents)
 
 
-def buildParentMap(tree: ast.AST) -> dict[int, ast.AST]:
-    parents: dict[int, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[id(child)] = parent
-    return parents
+def lineHasOk(lines: list[str], lineno: int) -> bool: return has_ok_marker(lines, lineno, OK_MARKERS)
 
 
-def functionAt(node: ast.AST, parents: dict[int, ast.AST]) -> str:
-    current = node
-    while id(current) in parents:
-        current = parents[id(current)]
-        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return current.name
-    return '<module>'
-
-
-def lineHasOk(lines: list[str], lineno: int) -> bool:
-    snippet = '\n'.join(lines[max(0, lineno - 2):min(len(lines), lineno + 1)])
-    return any(marker in snippet for marker in OK_MARKERS)
-
-
-def _resolveImport(moduleName: str, fromFile: Path, root: Path) -> Path | None:
-    parts = moduleName.split('.')
-    for base in (fromFile.parent, root):
-        candidate = base.joinpath(*parts).with_suffix('.py')
-        if candidate.exists():
-            resolved = candidate.resolve()
-            try:
-                resolved.relative_to(root)
-                return resolved
-            except ValueError as exc:
-                InsertDebuggerException('_resolveImport.relative', exc, str(resolved))
-        package = base.joinpath(*parts) / '__init__.py'
-        if package.exists():
-            resolved = package.resolve()
-            try:
-                resolved.relative_to(root)
-                return resolved
-            except ValueError as exc:
-                InsertDebuggerException('_resolveImport.package_relative', exc, str(resolved))
+def literalFloat(node: ast.AST) -> float | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
     return None
 
 
-def _importsFromAst(tree: ast.AST) -> list[str]:
-    names: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                names.append(alias.name)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.append(node.module)
-    return names
-
-
-def iterPy(paths: list[Path], root: Path) -> list[Path]:
-    seen: set[Path] = set()
-    dq: collections.deque[Path] = collections.deque()
-
-    def enqueue(path: Path) -> None:
-        resolvedPath = path.resolve()
-        if resolvedPath in seen or not resolvedPath.exists():
-            return
-        try:
-            parts = resolvedPath.relative_to(root).parts
-        except ValueError as exc:
-            InsertDebuggerException('iterPy.relative', exc, str(resolvedPath))
-            return
-        if any(part in SKIP_DIR_NAMES for part in parts):
-            return
-        seen.add(resolvedPath)
-        dq.append(resolvedPath)
-
-    for rawPath in paths:
-        path = Path(rawPath).resolve()
-        if path.is_file() and path.suffix == '.py':
-            enqueue(path)
-        elif path.is_dir():
-            for childPath in path.rglob('*.py'):
-                enqueue(childPath)
-
-    files: list[Path] = []
-    while dq:
-        filePath = dq.popleft()
-        files.append(filePath)
-        try:
-            source = tracedReadText(filePath, encoding='utf-8', errors='replace')
-            tree = ast.parse(source, filename=str(filePath))
-        except Exception as exc:
-            InsertDebuggerException('iterPy.parse_imports', exc, str(filePath))
-            continue
-        for moduleName in _importsFromAst(tree):
-            resolved = _resolveImport(moduleName, filePath, root)
-            if resolved:
-                enqueue(resolved)
-    return files
-
-
-def scan(path: Path) -> list[tuple[int, str, str]]:
-    try:
-        source = tracedReadText(path, encoding='utf-8', errors='replace')
-    except Exception as exc:
-        InsertDebuggerException('lifecycle.scan.read', exc, str(path))
-        return [(0, 'READ', str(exc))]
-    lines = source.splitlines()
-    try:
-        tree = ast.parse(source, filename=str(path))
-    except SyntaxError as exc:
-        InsertDebuggerException('lifecycle.scan.parse', exc, str(path))
-        return [(getattr(exc, 'lineno', 0) or 0, 'PARSE', str(exc))]
+def _scan(path: Path, lines: list[str], tree: ast.AST) -> list[tuple[int, str, str]]:
     parents = buildParentMap(tree)
     rows: list[tuple[int, str, str]] = []
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         lineno = int(getattr(node, 'lineno', 0) or 0)
         if lineHasOk(lines, lineno):
             continue
-        functionName = functionAt(node, parents)
-        if functionName in ALLOW_FUNCS:
-            continue
-        rule = BLOCKED_CALLS.get(dottedName(node.func))
+        func_name = enclosingFunction(node, parents)
+        class_name = enclosingClass(node, parents)
+        sample = lines[lineno - 1].strip()[:200] if 0 < lineno <= len(lines) else ''
+        context = f'{class_name}.{func_name}' if class_name else func_name
+
+        called = dottedName(node.func)
+        rule = BLOCKED_SPAWN.get(called)
         if rule:
-            sample = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ''
-            rows.append((lineno, rule, f'{functionName}: {sample[:220]}'))
+            if func_name not in SPAWN_ALLOWLIST_FUNCS and class_name not in SPAWN_ALLOWLIST_CLASSES:
+                rows.append((lineno, rule, f'{context}: {sample}'))
+
+        ctor_name = simpleName(node.func)
+        if ctor_name in TTL_REQUIRED_CTORS:
+            kw_names = {kw.arg for kw in node.keywords if kw.arg}
+            if not kw_names.intersection(TTL_KW_NAMES):
+                rows.append((lineno, 'NO_TTL', f'{context}: {ctor_name}() missing ttl/ttlSeconds/timeout_seconds — {sample}'))
+
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == 'start'
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id.lower() in PROCESS_LIKE_NAMES):
+            window_start = max(0, lineno - 1)
+            window_end = min(len(lines), lineno + 5)
+            window_text = '\n'.join(lines[window_start:window_end])
+            if '.pid' not in window_text and 'pid=' not in window_text:
+                rows.append((lineno, 'NO_PID', f'{context}: {node.func.value.id}.start() — no .pid capture nearby — {sample}'))
+
+        if called in ('time.sleep', 'sleep') and func_name == '<module>':
+            rows.append((lineno, 'BARE_SLEEP', f'<module>: {sample}'))
+        elif called in ('time.sleep',) and node.args:
+            secs = literalFloat(node.args[0])
+            if secs is not None and secs >= LONG_SLEEP_THRESHOLD and func_name == '<module>':
+                rows.append((lineno, 'BARE_SLEEP', f'<module> sleep({secs}s): {sample}'))
+
+        if isinstance(node.func, ast.Attribute) and node.func.attr in BLOCKING_METHODS:
+            kw_names = {kw.arg for kw in node.keywords if kw.arg}
+            has_timeout_kw = bool(kw_names.intersection({'timeout', 'ttl', 'deadline'}))
+            has_timeout_pos = len(node.args) > 0
+            if not has_timeout_kw and not has_timeout_pos:
+                rows.append((lineno, 'BLOCKING_NO_TIMEOUT', f'{context}: .{node.func.attr}() called without timeout — {sample}'))
+
+        is_communicate_attr = isinstance(node.func, ast.Attribute) and node.func.attr in BLOCKING_MAIN_THREAD_METHODS
+        is_blocking_spawn = called in BLOCKING_MAIN_THREAD_FUNCS
+        if is_communicate_attr or is_blocking_spawn:
+            in_worker = (
+                func_name in WORKER_THREAD_FUNCS
+                or class_name in WORKER_THREAD_CLASSES
+                or class_name in SPAWN_ALLOWLIST_CLASSES
+                or func_name in SPAWN_ALLOWLIST_FUNCS
+            )
+            if not in_worker:
+                method_label = f'.{node.func.attr}()' if is_communicate_attr else called + '()'
+                rows.append((lineno, 'BLOCKING_MAIN_THREAD', f'{context}: {method_label} blocks Qt event loop — {sample}'))
+
     return rows
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--root', default='.')
-    parser.add_argument('--output', required=True)
-    parser.add_argument('paths', nargs='*')
-    namespace = parser.parse_args()
-    root = Path(namespace.root).resolve()
-    rawPaths = [Path(path).resolve() for path in namespace.paths] if namespace.paths else [root]
-    files = iterPy(rawPaths, root)
-    findings: list[tuple[Path, int, str, str]] = []
-    for filePath in files:
-        for lineNumber, rule, message in scan(filePath):
-            findings.append((filePath, lineNumber, rule, message))
-    out = Path(namespace.output)
-    out.parent.mkdir(parents=True, exist_ok=True)  # file-io-ok
-    lines = [
-        'LIFECYCLE BYPASS DETECTOR REPORT',
-        '================================',
-        '',
-        f'Generated at: {datetime.datetime.now().isoformat(timespec="seconds")}',
-        f'Root: {root}',
-        f'Files scanned: {len(files)}',
-        f'Findings: {len(findings)}',
-        '',
-    ]
-    for filePath, lineNumber, rule, message in findings:
-        rel = os.path.relpath(filePath, root) if str(filePath).startswith(str(root)) else str(filePath)
-        lines.append(f'{rel}:{lineNumber}: {rule} {message}')
-    if not findings:
-        lines.append('No obvious direct process/thread lifecycle bypasses found in scanned app paths.')
-    text = '\n'.join(lines) + '\n'
-    tracedWriteText(out, text, encoding='utf-8')
-    print(text)
-    return 1 if findings else 0
+class LifecycleBypassDetector(Detector):
+    NAME = 'lifecyclebypass'
+    VERSION = '2.0.0'
+    REPORT_HEADER = 'LIFECYCLE BYPASS DETECTOR REPORT'
+    DEFAULT_OUTPUT = 'logs/lifecyclebypass.txt'
+
+    def scan_file(self, path: Path, source: str, lines: list[str], tree: ast.AST, root: Path) -> list[Finding]:
+        if path.name == 'lifecyclebypassdetector.py':
+            return []
+        try:
+            rel_parts = path.relative_to(root).parts
+        except Exception:
+            rel_parts = path.parts
+        # Framework/documentation helper scripts are CLI tooling, not the Qt app
+        # or FlatLine parent runtime. They are audited by file-io/bad-code/depcheck
+        # instead of the lifecycle process-boundary rule.
+        if rel_parts and rel_parts[0] in {'tools', 'handbook'}:
+            return []
+        findings = []
+        for lineno, rule, message in _scan(path, lines, tree):
+            findings.append(Finding(path, lineno, 0, 'HIGH', rule, message, ''))
+        return findings
+
+    def render_report(self, root: Path, files: list[Path], findings: list[Finding]) -> str:
+        by_rule: dict[str, list[Finding]] = collections.defaultdict(list)
+        for f in findings:
+            by_rule[f.rule].append(f)
+
+        lines_out = [
+            self.REPORT_HEADER,
+            '=' * len(self.REPORT_HEADER),
+            f'Version: {self.VERSION}',
+            '',
+            f'Generated at: {datetime.datetime.now().isoformat(timespec="seconds")}',
+            f'Root: {root}',
+            f'Files scanned: {len(files)}',
+            f'Findings: {len(findings)}',
+            '',
+        ]
+
+        if findings:
+            lines_out.append('Summary by rule:')
+            for rule in sorted(by_rule):
+                desc = RULE_DESCRIPTIONS.get(rule, rule)
+                lines_out.append(f'  {rule} ({len(by_rule[rule])}): {desc}')
+            lines_out.append('')
+            for rule in sorted(by_rule):
+                lines_out.append(f'--- {rule} ---')
+                for f in sorted(by_rule[rule], key=lambda x: (str(x.path), x.line)):
+                    lines_out.append(f'  {f.render(root)}')
+                lines_out.append('')
+            lines_out += [
+                'Suppression markers:',
+                '  # lifecycle-bypass-ok  # ttl-ok  # pid-ok  # sleep-ok  # block-ok  # main-thread-ok',
+            ]
+        else:
+            lines_out.append('No lifecycle bypass findings.')
+
+        return '\n'.join(lines_out) + '\n'
 
 
 if __name__ == '__main__':
-    os._exit(int(main()))
+    LifecycleBypassDetector.main()

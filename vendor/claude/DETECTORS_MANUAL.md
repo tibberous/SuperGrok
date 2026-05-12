@@ -573,3 +573,18 @@ If the scan finds Peewee references, replace them with the SQLAlchemy ORM
 session pattern (`_DataBase.session()`, `session.query(...)`, `session.add(...)`,
 `session.commit()`). The Peewee scan exits 0 even when findings are present — it
 is advisory only.
+
+
+## TrioDesktop local integration notes
+
+This repo also wires the newer dependency and import/file detectors into `start.py`:
+
+```text
+python start.py --depcheck   # logs/depcheck.txt
+python start.py --bfabi      # logs/bfabi.txt
+```
+
+`--depcheck` compares imports against `PYTHON_DEPENDENCIES` in `start.py`.
+`--bfabi` checks broken file reads and wrong/unknown import names. In TrioDesktop it
+uses `PYTHON_DEPENDENCIES` plus `knownimports.txt` as the source of truth and avoids
+running `pip list` during report-only health checks so detector runs stay bounded.

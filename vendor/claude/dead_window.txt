@@ -1,0 +1,542 @@
+Dead Window Prevention and DeadWindowMonitor v2
+================================================
+
+Audience
+--------
+This whitepaper is for GPT/codebot models editing FlatLine-style `start.py` launchers, especially Chat 24.7-style deploy/watch/operator-client projects.
+
+The goal is not just to detect new Python processes. The goal is to prevent and detect visible blank/dead Python console windows. A dead window can belong to the exact process you intentionally launched, so a monitor that simply ignores allowed PIDs can miss the bug.
+
+Core Diagnosis
+--------------
+The previous whitepaper was directionally useful, but it was still too weak in four places:
+
+1. It treated the problem as "new Python process appeared" instead of "visible dead console window appeared." The real bug can be a console window on an otherwise legitimate operator-client PID.
+2. It passed the launched operator client PID as allowed, which means the monitor would ignore the exact process most likely to own the blank console window.
+3. It only used process snapshots. It did not enumerate top-level Windows UI windows, window classes, titles, owning PIDs, and process command lines.
+4. It only guarded a few startup points. A real fix must make every subprocess launch go through one launcher with a declared window policy and automatic before/after monitoring.
+
+Definitions
+-----------
+Dead Python window:
+    A visible top-level window created by python.exe, pythonw.exe, py.exe, or a child process launched by start.py that is not an intended GUI surface.
+
+Suspicious console window:
+    A visible window with class `ConsoleWindowClass`, owned by python.exe/py.exe or by a known child PID, especially with an empty/generic title.
+
+Allowed process:
+    A process that start.py intentionally launched. Allowed does not mean all of its windows are allowed. An allowed Qt GUI child may still create an unwanted console window.
+
+Intended GUI window:
+    A visible top-level window owned by an allowed GUI child whose class/title matches the expected Qt/operator client surface, not ConsoleWindowClass.
+
+Golden Rules
+------------
+1. Plain `python start.py` and `python start.py --watch` must never start the operator GUI.
+2. `python start.py --operator-client` starts exactly one operator GUI.
+3. `python start.py --watch-client` may run both, but only because the user explicitly requested both.
+4. All process creation must go through `ProcessLauncher.start()` or `ProcessLauncher.run_probe()`.
+5. Every process launch must declare a window policy: `console_helper`, `gui_child`, `daemon`, or `probe`.
+6. Console helpers must use `CREATE_NO_WINDOW` on Windows and must drain stdout/stderr.
+7. GUI children must not use `SW_HIDE`. Prefer `pythonw.exe` for Python GUI scripts when available, or `CREATE_NO_WINDOW` only to suppress the console while still allowing normal GUI windows.
+8. The monitor must inspect actual windows, not just process rows.
+9. Allowed PID does not exempt ConsoleWindowClass windows.
+10. The intentional bad test must create a visible bad Python console window and prove the monitor exits with code 95.
+
+Process Launch Classes
+----------------------
+Use a single enum-style policy.
+
+```python
+class WindowPolicy:
+    CONSOLE_HELPER = "console_helper"  # pip, npm, winscp, powershell probe
+    GUI_CHILD = "gui_child"            # Qt/operator-client visible GUI
+    DAEMON = "daemon"                  # long-running server process
+    PROBE = "probe"                    # short bounded probe
+```
+
+Each policy has different rules.
+
+`console_helper`:
+    - `stdin=DEVNULL`
+    - `stdout=PIPE`, `stderr=STDOUT`
+    - reader thread drains output immediately
+    - Windows: `CREATE_NO_WINDOW`
+    - never `SW_HIDE` unless it is a true console-only probe and explicitly documented
+
+`gui_child`:
+    - no `SW_HIDE`
+    - preferably use `pythonw.exe` if launching a Python GUI script on Windows
+    - if using `python.exe`, use `CREATE_NO_WINDOW` to suppress console attachment
+    - monitor must allow the expected Qt window but still fail if the same PID owns a visible ConsoleWindowClass window
+
+`daemon`:
+    - must write logs to files or stream logs
+    - must have PID, TTL/health, and cleanup path
+    - no unbounded stdout PIPE without draining
+
+`probe`:
+    - short timeout only
+    - no GUI
+    - `CREATE_NO_WINDOW`
+    - stdin devnull
+    - capture is allowed only if bounded and timeout-protected
+
+Windows Helpers
+---------------
+
+```python
+def windows_creation_flags(policy: str) -> int:
+    if os.name != "nt":
+        return 0
+    if policy in {WindowPolicy.CONSOLE_HELPER, WindowPolicy.PROBE, WindowPolicy.GUI_CHILD}:
+        return int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+    return 0
+
+
+def windows_startupinfo_for_probe() -> object | None:
+    if os.name != "nt":
+        return None
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= int(getattr(subprocess, "STARTF_USESHOWWINDOW", 0) or 0)
+    startupinfo.wShowWindow = 0
+    return startupinfo
+```
+
+Do not pass `windows_startupinfo_for_probe()` to GUI children. It is only for console-only probes.
+
+Choose Python Executable For GUI Children
+-----------------------------------------
+
+```python
+def pythonw_executable() -> str:
+    if os.name != "nt":
+        return sys.executable
+    exe = Path(sys.executable)
+    candidate = exe.with_name("pythonw.exe")
+    if candidate.exists():
+        return str(candidate)
+    return str(exe)
+```
+
+For a Qt/operator client, launch:
+
+```python
+command = [pythonw_executable(), str(BASE_DIR / "server" / "operator_client.py")]
+```
+
+If `pythonw.exe` is not available, `CREATE_NO_WINDOW` still suppresses the console for `python.exe`, but the monitor must verify no ConsoleWindowClass is visible.
+
+Root Debug Tee
+--------------
+Install this before any launches so both parent and child launch traces reach `debug.log`.
+
+```python
+class DebugTee:
+    def __init__(self, stream, log_path: Path):
+        self.stream = stream
+        self.log_path = Path(log_path)
+        self.encoding = getattr(stream, "encoding", None) or "utf-8"
+        self.errors = getattr(stream, "errors", None) or "replace"
+
+    def write(self, data: object) -> int:
+        text = str(data)
+        try:
+            self.stream.write(text)
+        except Exception:
+            pass
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8", errors="replace") as fh:
+                fh.write(text)
+        except Exception:
+            pass
+        return len(text)
+
+    def flush(self) -> None:
+        try:
+            self.stream.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name: str):
+        return getattr(self.stream, name)
+
+
+def install_debug_tee(debug_log: Path) -> None:
+    if not isinstance(sys.stdout, DebugTee):
+        sys.stdout = DebugTee(sys.stdout, debug_log)
+    if not isinstance(sys.stderr, DebugTee):
+        sys.stderr = DebugTee(sys.stderr, debug_log)
+    os.environ.setdefault("CHAT247_DEBUG_LOG", str(debug_log))
+```
+
+Window Enumeration Is Mandatory
+-------------------------------
+Process enumeration alone is not enough. Implement a Windows window snapshot with `ctypes`.
+
+```python
+@dataclass(frozen=True)
+class WindowRow:
+    hwnd: int
+    pid: int
+    title: str
+    class_name: str
+    visible: bool
+
+
+def enum_windows() -> list[WindowRow]:
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    rows: list[WindowRow] = []
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd, lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        title_buf = ctypes.create_unicode_buffer(512)
+        class_buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, title_buf, 512)
+        user32.GetClassNameW(hwnd, class_buf, 256)
+        rows.append(WindowRow(
+            hwnd=int(hwnd),
+            pid=int(pid.value or 0),
+            title=str(title_buf.value or ""),
+            class_name=str(class_buf.value or ""),
+            visible=True,
+        ))
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(callback), 0)
+    return rows
+```
+
+Process Snapshot
+----------------
+Use process rows too, but treat them as supporting evidence for the window rows.
+
+```python
+@dataclass(frozen=True)
+class ProcessRow:
+    pid: int
+    parent_pid: int
+    name: str
+    command_line: str
+
+
+def snapshot_python_processes() -> dict[int, ProcessRow]:
+    if os.name != "nt":
+        return {}
+    ps = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match '^(python|pythonw|py)\\.exe$' } | "
+        "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps],
+        text=True,
+        capture_output=True,
+        timeout=8,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        creationflags=windows_creation_flags(WindowPolicy.PROBE),
+        startupinfo=windows_startupinfo_for_probe(),
+    )
+    raw = (completed.stdout or "").strip()
+    if not raw:
+        return {}
+    data = json.loads(raw)
+    if isinstance(data, dict):
+        data = [data]
+    result: dict[int, ProcessRow] = {}
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        pid = int(item.get("ProcessId") or 0)
+        if pid:
+            result[pid] = ProcessRow(
+                pid=pid,
+                parent_pid=int(item.get("ParentProcessId") or 0),
+                name=str(item.get("Name") or ""),
+                command_line=str(item.get("CommandLine") or ""),
+            )
+    return result
+```
+
+DeadWindowMonitor v2
+--------------------
+
+```python
+class DeadWindowMonitor:
+    BAD_WINDOW_CLASSES = {"ConsoleWindowClass"}
+    PYTHON_NAMES = {"python.exe", "pythonw.exe", "py.exe"}
+    PROJECT_KEYWORDS = {"chat247", "247ch.at", "operator_client", "start.py", "flatline"}
+
+    def __init__(self, *, fail_env: str = "CHAT247_FAIL_ON_DEAD_WINDOW", default_fail: bool = True):
+        self.fail_env = fail_env
+        self.default_fail = default_fail
+        self.parent_pid = os.getpid()
+
+    def snapshot(self) -> tuple[dict[int, ProcessRow], list[WindowRow]]:
+        return snapshot_python_processes(), enum_windows()
+
+    def fail_enabled(self) -> bool:
+        text = str(os.environ.get(self.fail_env, "1" if self.default_fail else "0")).lower().strip()
+        return text in {"1", "true", "yes", "on"}
+
+    def suspicious_windows_after(
+        self,
+        before_windows: list[WindowRow],
+        after_processes: dict[int, ProcessRow],
+        after_windows: list[WindowRow],
+        *,
+        allowed_gui_pids: set[int],
+        source_line: str,
+    ) -> list[WindowRow]:
+        before_keys = {(w.hwnd, w.pid, w.class_name, w.title) for w in before_windows}
+        bad: list[WindowRow] = []
+        for win in after_windows:
+            key = (win.hwnd, win.pid, win.class_name, win.title)
+            if key in before_keys:
+                continue
+            proc = after_processes.get(win.pid)
+            cmd = (proc.command_line if proc else "").lower()
+            name = (proc.name if proc else "").lower()
+
+            # Critical: allowed GUI PID does not allow its console window.
+            if win.class_name in self.BAD_WINDOW_CLASSES:
+                if win.pid in allowed_gui_pids or name in self.PYTHON_NAMES or any(k in cmd for k in self.PROJECT_KEYWORDS):
+                    bad.append(win)
+                    continue
+
+            # New visible Python/project window with no title is suspicious.
+            if not win.title.strip() and (name in self.PYTHON_NAMES or any(k in cmd for k in self.PROJECT_KEYWORDS)):
+                bad.append(win)
+                continue
+        return bad
+
+    def check_after(
+        self,
+        before: tuple[dict[int, ProcessRow], list[WindowRow]],
+        *,
+        source_line: str,
+        allowed_gui_pids: set[int] | None = None,
+        delay_seconds: float = 2.0,
+        poll_seconds: float = 0.25,
+    ) -> None:
+        if os.name != "nt":
+            return
+        allowed_gui_pids = set(allowed_gui_pids or set())
+        deadline = time.time() + max(0.5, delay_seconds)
+        bad: list[WindowRow] = []
+        after_processes: dict[int, ProcessRow] = {}
+        after_windows: list[WindowRow] = []
+        while time.time() < deadline:
+            after_processes, after_windows = self.snapshot()
+            bad = self.suspicious_windows_after(
+                before[1], after_processes, after_windows,
+                allowed_gui_pids=allowed_gui_pids,
+                source_line=source_line,
+            )
+            if bad:
+                break
+            time.sleep(max(0.05, poll_seconds))
+        if not bad:
+            Trace.info(f"DEAD-WINDOW-MONITOR:OK opener={source_line}")
+            return
+        Trace.fail(f"DEAD-WINDOW-MONITOR:DETECTED count={len(bad)} opener={source_line}")
+        for win in bad:
+            proc = after_processes.get(win.pid)
+            Trace.fail(json.dumps({
+                "hwnd": win.hwnd,
+                "pid": win.pid,
+                "class": win.class_name,
+                "title": win.title,
+                "process": proc.name if proc else "",
+                "command_line": proc.command_line if proc else "",
+            }, ensure_ascii=False, sort_keys=True))
+        if self.fail_enabled():
+            os._exit(95)
+```
+
+ProcessLauncher
+---------------
+A monitor is not enough if developers can still call `subprocess.Popen` directly. Centralize launch and monitor there.
+
+```python
+class ProcessLauncher:
+    def __init__(self, monitor: DeadWindowMonitor):
+        self.monitor = monitor
+
+    def start(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        prefix: str,
+        policy: str,
+        env: dict[str, str] | None = None,
+        expected_gui: bool = False,
+    ) -> subprocess.Popen[str]:
+        before = self.monitor.snapshot()
+        Trace.info(f"PROCESS:START policy={policy} prefix={prefix} cwd={cwd} command={' '.join(map(str, command))}")
+        startupinfo = windows_startupinfo_for_probe() if policy == WindowPolicy.PROBE else None
+        proc = subprocess.Popen(
+            [str(part) for part in command],
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=subprocess_text_env(env),
+            creationflags=windows_creation_flags(policy),
+            startupinfo=startupinfo,
+        )
+        Trace.info(f"PROCESS:STARTED prefix={prefix} pid={proc.pid} policy={policy}")
+        threading.Thread(target=stream_process_output, args=(prefix, proc.stdout), daemon=True).start()
+        if os.name == "nt":
+            allowed_gui_pids = {proc.pid} if policy == WindowPolicy.GUI_CHILD else set()
+            threading.Thread(
+                target=self.monitor.check_after,
+                kwargs={
+                    "before": before,
+                    "source_line": f"ProcessLauncher.start prefix={prefix} policy={policy}",
+                    "allowed_gui_pids": allowed_gui_pids,
+                    "delay_seconds": 3.0,
+                },
+                daemon=True,
+                name=f"dead-window:{prefix}",
+            ).start()
+        return proc
+
+    def run_probe(self, command: list[str], *, cwd: Path, prefix: str, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+        before = self.monitor.snapshot()
+        completed = subprocess.run(
+            [str(part) for part in command],
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            creationflags=windows_creation_flags(WindowPolicy.PROBE),
+            startupinfo=windows_startupinfo_for_probe(),
+            env=subprocess_text_env(),
+        )
+        self.monitor.check_after(before, source_line=f"ProcessLauncher.run_probe prefix={prefix}", delay_seconds=1.0)
+        if completed.stdout:
+            for line in completed.stdout.splitlines():
+                Trace.info(f"{prefix} {line}")
+        return completed
+```
+
+Operator Client Launch
+----------------------
+Do not auto-start from plain watch. Do not use python.exe if pythonw.exe exists.
+
+```python
+def launch_operator_client() -> int:
+    if existing_operator_client_pid():
+        return 0
+    client_path = BASE_DIR / "server" / "operator_client.py"
+    if not client_path.exists():
+        Trace.fail(f"OPERATOR-CLIENT:MISSING {client_path}")
+        return 2
+    command = [pythonw_executable(), str(client_path)]
+    proc = PROCESS_LAUNCHER.start(
+        command,
+        cwd=BASE_DIR,
+        prefix="OPERATOR-CLIENT",
+        policy=WindowPolicy.GUI_CHILD,
+        env=operator_client_environment(),
+        expected_gui=True,
+    )
+    write_operator_client_lock(proc.pid, command)
+    return 0
+```
+
+Watch Mode
+----------
+Plain watch must not open the operator client.
+
+```python
+def main(argv: list[str]) -> int:
+    args = build_arg_parser().parse_args(argv)
+    if args.operator_client:
+        return launch_operator_client()
+    if args.watch_client:
+        launch_operator_client()
+        return run_watch_loop()
+    if args.watch or not argv:
+        return run_watch_loop()
+    return run_push_current(reason="manual")
+```
+
+Validation
+----------
+A model cannot claim success until these pass on Windows:
+
+```powershell
+python -m py_compile start.py
+$env:CHAT247_FAIL_ON_DEAD_WINDOW="1"
+python start.py --watch
+python start.py --operator-client
+python start.py --operator-client
+$env:CHAT247_TEST_DEAD_WINDOW="1"
+python start.py --watch
+```
+
+Expected:
+- `--watch` does not open operator GUI.
+- `--watch` creates no visible Python console window.
+- `--operator-client` opens one intended GUI and no blank console window.
+- second `--operator-client` reports existing lock/process and does not open another.
+- intentional bad test exits code 95 and logs the owning PID, hwnd, window class, title, command line, and opener.
+
+Intentional Bad Test
+--------------------
+The old bad test is too weak if it launches with hidden flags or exits too quickly. Use a visible console window deliberately.
+
+```python
+def intentional_dead_window_test() -> None:
+    if os.name != "nt" or os.environ.get("CHAT247_TEST_DEAD_WINDOW") != "1":
+        return
+    before = DEAD_WINDOW_MONITOR.snapshot()
+    subprocess.Popen(
+        [sys.executable, "-c", "import time; print('dead window test'); time.sleep(60)"],
+        creationflags=0,  # deliberately visible console inheritance/creation
+    )
+    DEAD_WINDOW_MONITOR.check_after(before, source_line="intentional_dead_window_test", delay_seconds=5.0)
+```
+
+Comport / Detector Rules
+------------------------
+Add a detector that fails if:
+
+1. `subprocess.Popen` appears outside `ProcessLauncher` or the intentional bad test.
+2. `subprocess.run` appears outside `ProcessLauncher.run_probe`, bounded helper functions, or documented detector exceptions.
+3. A GUI launch uses `STARTF_USESHOWWINDOW` / `SW_HIDE`.
+4. A GUI launch uses `python.exe` when `pythonw_executable()` exists and is not used.
+5. `DeadWindowMonitor` does not call `EnumWindows` / `GetWindowThreadProcessId` / `GetClassName`.
+6. `DeadWindowMonitor` ignores allowed GUI PIDs entirely instead of still checking for ConsoleWindowClass windows.
+7. Plain watch mode calls `launch_operator_client` or `maybe_auto_start_operator_client`.
+8. The intentional bad test is missing.
+9. The monitor does not log hwnd, PID, window class, title, command line, and opener.
+10. `stdout=PIPE` is used without a reader/drainer or bounded `communicate(timeout=...)`.
+
+Final Note
+----------
+If a blank Python interpreter window still appears after the previous whitepaper was implemented, the likely reason is that the process was treated as allowed while its console window was not inspected. The fix is to monitor windows, not just processes, and to treat ConsoleWindowClass as forbidden even for an allowed GUI child PID.
