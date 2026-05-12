@@ -4893,8 +4893,28 @@ class SuperGrokBridgeWindow(QMainWindow):
         # ChatGPT intentionally use separate default profile folders so a normal
         # Grok login cannot pollute ChatGPT cookies, and ChatGPT can be logged in
         # once through the visible bridge then reused by later CLI chats.
+        #
+        # Default path: %USERPROFILE%/.supergrok/profiles/<target>/. Survives
+        # repo clones, shared with the stripped login_bridge so a login done
+        # there persists into the full bridge. First-run auto-migrates from the
+        # legacy data/<target>_profile/ folder (copytree, non-destructive).
         profile = QWebEngineProfile(f"SuperGrokBridge{providerLabel}Profile", self)
-        path = Path(profileDir).expanduser().resolve() if profileDir else (DATA / f"{targetName}_profile")
+        if profileDir:
+            path = Path(profileDir).expanduser().resolve()
+        else:
+            path = (Path.home() / ".supergrok" / "profiles" / targetName).resolve()
+            legacy = DATA / f"{targetName}_profile"
+            if legacy.exists() and (not path.exists() or not any(path.iterdir() if path.exists() else [])):
+                try:
+                    import shutil as _shutil  # local import — only used on first-run migrate
+                    path.mkdir(parents=True, exist_ok=True)
+                    for sub in ("storage", "cache"):
+                        src = legacy / sub
+                        if src.exists():
+                            _shutil.copytree(src, path / sub, dirs_exist_ok=True)
+                    print(f"[profile] migrated legacy {legacy} -> {path}", flush=True)
+                except Exception as migErr:
+                    recordException("supergrok_bridge/app.py:profile-migration", migErr, extra={"legacy": str(legacy), "new": str(path)})
         storagePath = path / "storage"
         cachePath = path / "cache"
         storagePath.mkdir(parents=True, exist_ok=True)

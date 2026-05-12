@@ -1909,6 +1909,28 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "debug", False):
             print(f"[gh_pipeline] dispatch error: {type(ghError).__name__}: {ghError}", file=sys.stderr, flush=True)
 
+    # --login / --probe-auth — stripped login-only window or headless auth probe.
+    # Provider resolves from --target, or from --chatgpt/--gemini/--claude alias.
+    if getattr(args, "login", False) or getattr(args, "probe_auth", False):
+        try:
+            from login_bridge import runCli as _loginRun
+        except Exception as importErr:
+            print(f"[login-bridge] import failed: {type(importErr).__name__}: {importErr}", file=sys.stderr, flush=True)
+            return 2
+        action = "probe-auth" if getattr(args, "probe_auth", False) else "login"
+        targetHint = (getattr(args, "target", "") or "").strip()
+        if not targetHint:
+            if getattr(args, "chatgpt_alias_requested", False) or getattr(args, "chatgpt", None) is not None:
+                targetHint = "chatgpt"
+            elif getattr(args, "gemini_alias_requested", False) or getattr(args, "gemini", None) is not None:
+                targetHint = "gemini"
+            elif getattr(args, "claude_alias_requested", False) or getattr(args, "claude", None) is not None:
+                targetHint = "claude"
+            else:
+                targetHint = "grok"
+        provider = normalizeChatTarget(targetHint)
+        return int(_loginRun(action, provider, getattr(args, "profile_dir", "") or ""))
+
     if args.serve_bridge:
         replaceBridgeServiceBeforeServing(args)
 
