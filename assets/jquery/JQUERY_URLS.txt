@@ -1,0 +1,2 @@
+Target jQuery version: 3.7.1
+Official CDN: https://code.jquery.com/jquery-3.7.1.min.js

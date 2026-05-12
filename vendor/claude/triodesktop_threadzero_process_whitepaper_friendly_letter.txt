@@ -1,0 +1,417 @@
+Friendly Letter / White Paper for the Next ChatGPT Code Bot
+TrioDesktop Thread-Zero / Process-Phase Architecture Handoff
+Date: 2026-04-27
+
+Dear ChatGPT buddy,
+
+This is a handoff letter for a project that shares architectural DNA with TrioDesktop. The short version is simple:
+
+The debugger cannot debug reliably if the application is still secretly running important work in threads inside the same parent process. A crashed or hung thread can still poison the debugger process. The whole point of the FlatLine-style architecture is that the debugger parent survives child crashes, dependency hangs, GUI faults, startup failures, and tool-install failures.
+
+So the big architecture rule is:
+
+    If it can hang, crash, block, install, probe tools, touch Qt, run long, or own app work,
+    it must be a lifecycle phase and, where practical, an OS process.
+
+Do not rename a thread wrapper to "ProcessJob" and call it done. That is worse than doing nothing, because it lies to the developer and makes grep/audit output misleading.
+
+What was done in TrioDesktop
+----------------------------
+
+In the TrioDesktop CWV thread-zero pass, the previous fake process wrappers were targeted directly.
+
+The bad old pattern looked like this:
+
+    ProcessJob(...)
+    StartWorkerProcess(...)
+    spawnManagedProcess(...)
+
+but under the hood they still created:
+
+    threading.Thread(...)
+
+That meant the architecture was not actually crash-proof. The debugger could still hang before or during child startup. It also meant the developer could not press D and reliably get a debugger console while dependency installs, font setup, Pyright/Pirate checks, or startup probes were stuck.
+
+The thread-zero pass did the following:
+
+1. Removed direct threading.Thread creation from start.py.
+2. Removed direct threading.Thread creation from gtp.py.
+3. Removed or renamed lifecycle surfaces that suggested "thread" was an approved execution primitive.
+4. Burned down fake "process" wrappers that were actually thread-backed.
+5. Kept the debugger D binding visible and active.
+6. Bumped the visible debugger version so the user could tell the deployed file changed.
+7. Preserved compile sanity checks and debugger-surface checks.
+8. Added a grep-based acceptance test:
+
+       rg -i "thread" start.py gtp.py config.ini languages docs
+
+   The target for TrioDesktop was zero results, unless a remaining hit has an extremely good reason and is documented plainly.
+
+Why this matters
+----------------
+
+A debugger process is supposed to remain alive when the app dies.
+
+If the app and debugger share long-running threads, then the "debugger" is not isolated. A crash, deadlock, runaway install command, bad Qt init, font install hang, or tool probe can freeze the same process that is supposed to be reporting the crash.
+
+That defeats the whole purpose of FlatLine.
+
+The desired model is:
+
+    start.py
+      FlatLine parent / supervisor / debugger
+      key loop and status reporting stay alive
+      launches gtp.py or worker roles as child processes
+      owns lifecycle phases
+      records child process status, exit codes, fault info, stdout/stderr, and timeouts
+
+    gtp.py
+      application child
+      owns application lifecycle phases
+      runs Qt only in phases marked includesQT=True
+      can skip Qt phases in headless mode
+      reports surfaces to parent where possible
+      dies without killing parent debugger
+
+Process and phase rules
+-----------------------
+
+Every unit of work should be represented as a phase.
+
+A phase should have at least these properties:
+
+    phaseId
+    phaseName
+    canRunHeadless
+    includesQT
+    timeoutSeconds / ttlSeconds
+    processRole or callback
+    status
+    startedAt
+    completedAt
+    failedAt
+    exitCode
+    error
+    traceback
+    stdout/stderr capture path or relay mode
+
+Recommended phase semantics:
+
+    canRunHeadless=True
+        This phase may run during --headless.
+
+    canRunHeadless=False
+        This phase must be skipped during --headless.
+
+    includesQT=True
+        This phase touches Qt, QtWebEngine, QApplication, widgets, paint/show logic, dialogs,
+        font GUI surfaces, or event-loop-only functionality.
+
+    includesQT=False
+        This phase is safe to run without Qt.
+
+Headless should not be a fake alternate app. Delete separate headlessMain-style smoke tests. Headless should run the real app lifecycle and skip only phases that declare they cannot run headless.
+
+Bad:
+
+    def headlessMain():
+        print("validating")
+        doTinySqlTest()
+        constructHalfApp()
+        return 0
+
+Good:
+
+    def main():
+        lifecycle = ApplicationLifecycleController(headless=args.headless)
+        lifecycle.registerPhases(...)
+        return lifecycle.run()
+
+Inside lifecycle.run():
+
+    for phase in phases:
+        if self.headless and not phase.canRunHeadless:
+            print(f"[HEADLESS] skipping phase {phase.name} includesQT={phase.includesQT} canRunHeadless={phase.canRunHeadless}")
+            continue
+        phase.run()
+
+No fake process wrappers
+------------------------
+
+Do not do this:
+
+    class ProcessJob:
+        def start(self):
+            threading.Thread(target=self.run).start()
+
+That is not a process. That is a thread with a misleading name.
+
+Use a real process boundary for worker roles. The safest pattern is for the parent to launch the same script with a worker-role command line:
+
+    python start.py --worker dependency-install --dependency fontforge_python_bindings
+    python start.py --worker terminal-font-apply
+    python gtp.py --worker snapshot-process
+    python gtp.py --worker provider-probe --provider openai
+
+Then the parent can track:
+
+    pid
+    command
+    startedAt
+    timeout
+    stdout
+    stderr
+    returncode
+    killed/timed-out status
+
+Dependency install must be process-owned
+----------------------------------------
+
+Dependency install must never hold the debugger hostage.
+
+Bad:
+
+    installMissingDependencies()
+    subprocess.run(["pip", "install", ...])  # directly in parent startup
+
+Good:
+
+    phase = Phase(
+        name="dependency-install-fontforge",
+        processRole="dependency-install",
+        timeoutSeconds=300,
+        canRunHeadless=True,
+        includesQT=False,
+    )
+
+    lifecycle.runProcessPhase(phase)
+
+The parent debugger should remain alive and should be able to show the user:
+
+    [TRACE:dependency-phase] started pid=1234 dependency=fontforge_python_bindings
+    [TRACE:dependency-phase] timeout=300s
+    [WARN:dependency-phase] timed out; killed process group
+    [TRACE:dependency-phase] rechecking import fontforge -> FAIL
+    [TRACE:dependency-phase] rechecking import psMat -> FAIL
+
+FontForge / psMat dependency rule
+---------------------------------
+
+psMat is not the thing to install.
+
+psMat is a module to check.
+
+The Python package/distribution install route is FontForge.
+
+Dependency registry entry should look conceptually like this:
+
+    Dependency(
+        name="fontforge_python_bindings",
+        displayName="FontForge Python bindings",
+        modules=("fontforge", "psMat"),
+        pipPackages=("fontforge",),
+        osFallbacks=(
+            "apt install python3-fontforge",
+            "winget install -e --id FontForge.FontForge",
+        ),
+    )
+
+The important distinction is:
+
+    modules/import checks: fontforge, psMat
+    pip install package: fontforge
+
+Installer order should be:
+
+    1. python -m pip install --prefer-binary fontforge
+    2. python -m pip install --upgrade fontforge
+    3. python -m pip install --user fontforge if permissions fail
+    4. Linux package fallback, such as python3-fontforge
+    5. Windows winget FontForge fallback only as last ditch
+    6. re-check import fontforge and import psMat after every route
+
+Do not start with winget. winget installs an application; it does not prove the current Python interpreter can import psMat.
+
+Debugger D key / console requirement
+------------------------------------
+
+The debugger key binding must exist before heavy startup work.
+
+The startup output should explicitly say:
+
+    Key binding active: D -> debugger console
+
+The key loop must not depend on:
+
+    Qt
+    app child successfully importing
+    dependency install completing
+    Pyright/Pirate scan completing
+    terminal font install completing
+    WinSCP/PuTTY/tool discovery completing
+
+If D does not work while the child is hung, the architecture is not done.
+
+Tool discovery and installers
+-----------------------------
+
+Tool discovery should also be phased and traced. It should not silently block the debugger.
+
+For Windows:
+
+    WindowsRegistry
+      App Paths
+      Uninstall keys
+      known vendor keys
+      32-bit and 64-bit registry views
+      trace every key/value checked
+
+For Linux:
+
+    Etc
+      /etc
+      /usr
+      /usr/local
+      /opt
+      XDG config roots
+      snap/flatpak export paths
+      user-local bin/config paths
+      trace every path checked
+
+But tool discovery should not be a reason the debugger never appears. If it can be slow or weird, it belongs in a phase or worker process.
+
+Terminal font / glyph handling
+------------------------------
+
+The terminal font handshake should not block the debugger.
+
+Correct model:
+
+    Early banner prints safe ASCII diagnostics.
+    Font change/install is queued as a lifecycle phase/worker process.
+    Worker verifies:
+        terminal host
+        terminal version
+        current font
+        target font family
+        whether setting file/registry changed
+        whether change stuck
+    If it fails, warn with reason.
+
+Do not assume emoji support just because the font contains a glyph. Classic ConsoleHost and Windows Terminal behave differently. Windows Terminal uses JSON settings. Classic console uses console APIs / registry fallback. Non-BMP emoji may still magic-box in ConsoleHost, so BMP/private-use aliases may be needed.
+
+Static analysis / Pylance/Pyright
+---------------------------------
+
+The next project should not leave Pylance/Pyright errors to block startup.
+
+The pasted bug list from TrioDesktop showed examples like:
+
+    int(object) argument type errors
+    duplicate function declarations
+    Packager attributes monkey-patched after class definition
+    Pyright prompt blocking startup
+
+The fixes are architectural:
+
+    Do not monkey-patch class members if Pylance needs to understand them.
+    Put attributes and methods on the class where they belong.
+    Avoid duplicate function names.
+    Use safe type conversion helpers.
+    Never let Pyright/Pirate prompt block debugger startup by default.
+
+Pyright/Pirate scan belongs in a phase. It can warn, report, and attach diagnostics, but it should not prevent the debugger parent from existing.
+
+Acceptance checklist for the other project
+------------------------------------------
+
+Before handing back the other project, run these checks:
+
+1. Grep check:
+
+       rg -i "thread" start.py *.py classes docs config.ini
+
+   Goal: zero results, or every remaining result has a documented reason and is not an execution primitive.
+
+2. Direct thread creation check:
+
+       rg "threading\.Thread|Thread\(" .
+
+   Goal: zero execution-path hits.
+
+3. Direct blocking command check:
+
+       rg "subprocess\.run|os\.system|Popen" start.py *.py
+
+   Any hit must be lifecycle/process-owned and timeout-protected.
+
+4. Headless check:
+
+       python start.py --headless --ad-off --no-scan
+
+   It should run real lifecycle phases and skip only canRunHeadless=False phases.
+
+5. Debugger check:
+
+       python start.py --debug --ad-off --no-scan --headless
+
+   It should print:
+       Key binding active: D -> debugger console
+       FlatLine heartbeat/status
+       child launch pid
+       child exit/fault status
+
+6. Dependency worker check:
+
+       Trigger a missing dependency or fake one.
+       The debugger must remain alive.
+       The dependency phase must timeout and warn instead of hanging the parent.
+
+7. Pyright/Pirate check:
+
+       Startup scan must be skippable with --no-scan.
+       Debug mode must not block on "Continue running anyway? [y/N]" unless an explicit prompt env var is set.
+
+8. Zip handoff check:
+
+       Rebuild the final zip from the current working version.
+       Verify changed files are inside the zip.
+       Verify zip integrity.
+       Delete stale workspaces/zips before handoff.
+
+Tone from the project owner
+---------------------------
+
+The project owner is not being difficult when he demands phases/processes. He is protecting the debugging architecture.
+
+The reason is practical:
+
+    If the debugger works, he can provide exact crash lines.
+    If the debugger hangs, he can only provide screenshots and vague symptoms.
+    Exact crash lines make the code bot faster.
+    Vague symptoms waste everyone’s time.
+
+So do not fight the architecture. Follow it.
+
+Final instruction
+-----------------
+
+For the related project based on this codebase:
+
+    Unzip/stage one current working version.
+    Run AST first.
+    Map the lifecycle.
+    Burn down fake thread-backed "process" wrappers.
+    Move slow/blocking work into lifecycle process phases.
+    Delete fake headless runners.
+    Make headless run the real lifecycle.
+    Keep D/debugger alive before app work.
+    Grep for thread and make it zero or explain every remaining hit.
+    Deliver one complete repo zip, not patch scripts.
+
+End of friendly handoff.
+
+With respect,
+
+The previous ChatGPT code bot
+who finally stopped calling threads processes

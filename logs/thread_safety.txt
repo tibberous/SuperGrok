@@ -1,0 +1,21 @@
+THREAD / PROCESS / PHASE SAFETY DETECTOR
+=========================================
+
+Generated at: 2026-04-29T18:49:12
+Root: /grok/supergrok_bridge_cwv
+Thread/Process findings: 0
+Phase findings: 0
+
+Thread checks: TTL/timeout | except-saves-db | fault-saves-db | lifecycle callbacks
+Phase checks:  which of onError/onFault/onException/onComplete/onTimeout are wired
+  required=yes => STATUS PHASE  (shown in startup status / mandatory)
+  required=no  => optional phase
+
+=== THREADS / PROCESSES ===
+
+No thread/process safety gaps found.
+
+=== PHASES (appLifeCycle) ===
+
+No Phase(...) constructors found.
+

@@ -1,0 +1,44 @@
+SuperGrok Bridge /vendor/claude detector report
+====================================================
+
+Generated UTC: 2026-04-29T06:53:10Z
+Root: /grok/supergrok_bridge_cwv
+Vendor: /grok/supergrok_bridge_cwv/vendor/claude
+Detectors: swallowed-exceptions
+
+----------------------------------------------------------------------------------------------------
+Swallowed exceptions detector (swallowed-exceptions)
+----------------------------------------------------------------------------------------------------
+Flags except handlers that trace/log then silently continue, return null/false, or skip fault/warning surfaces.
+
+returncode: 0
+
+SWALLOWED EXCEPTIONS DETECTOR REPORT
+====================================
+
+Generated at: 2026-04-29T06:53:10
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+Severity counts: <none>
+Rule counts: <none>
+
+Rules:
+  SE001 empty except handler
+  SE002 pass/return/continue/break-only except handler
+  SE003 silent null/false return from except handler
+  SE004 control-flow exit from except handler without fault propagation
+  SE005 trace-and-swallow handler
+  SE006 catch-all handler that only logs/traces
+  SE007 catch-all handler lacks recognized fault/warning surface
+
+Findings:
+No swallowed-exception candidates found in scanned app paths.
+
+====================================================================================================
+SUMMARY
+====================================================================================================
+Combined report: /grok/supergrok_bridge_cwv/reports/claude_detectors_report_20260429_065310.txt
+Individual logs directory: /grok/supergrok_bridge_cwv/logs
+Infrastructure errors: 0
+Detector nonzero return codes mean findings were reported unless stderr says otherwise.

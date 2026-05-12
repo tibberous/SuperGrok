@@ -1,0 +1,11 @@
+UNLOCALIZED STRING DETECTOR REPORT
+===================================
+
+Generated at: 2026-04-29T18:49:13
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+
+Suppress a finding by adding  # // localized  to the same line.
+
+No unlocalized UI strings found.

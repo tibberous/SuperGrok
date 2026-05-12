@@ -1,0 +1,5 @@
+Target PrismJS version: 1.30.0
+Official package page: https://www.jsdelivr.com/package/npm/prismjs
+CDN root: https://cdn.jsdelivr.net/npm/prismjs@1.30.0/
+Core: https://cdn.jsdelivr.net/npm/prismjs@1.30.0/prism.min.js
+Theme: https://cdn.jsdelivr.net/npm/prismjs@1.30.0/themes/prism-tomorrow.min.css

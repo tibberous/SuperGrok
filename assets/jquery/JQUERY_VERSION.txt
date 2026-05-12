@@ -1,0 +1,3 @@
+Target jQuery version: 3.7.1
+Local file is a tiny fallback shim for the left chat pane only because the build sandbox could not fetch the CDN payload.
+Run: python tools/fetch_jquery.py

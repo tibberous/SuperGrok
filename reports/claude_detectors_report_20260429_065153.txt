@@ -1,0 +1,125 @@
+SuperGrok Bridge /vendor/claude detector report
+====================================================
+
+Generated UTC: 2026-04-29T06:51:53Z
+Root: /grok/supergrok_bridge_cwv
+Vendor: /grok/supergrok_bridge_cwv/vendor/claude
+Detectors: lifecycle-bypass, monkeypatch, raw-sql, recursion, redundant, swallowed-exceptions
+
+----------------------------------------------------------------------------------------------------
+Lifecycle bypass detector (lifecycle-bypass)
+----------------------------------------------------------------------------------------------------
+Flags direct subprocess/thread/os.system calls outside approved lifecycle wrappers.
+
+returncode: 0
+
+LIFECYCLE BYPASS DETECTOR REPORT
+================================
+
+Generated at: 2026-04-29T06:51:55
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+
+No obvious direct process/thread lifecycle bypasses found in scanned app paths.
+
+----------------------------------------------------------------------------------------------------
+Monkey patch detector (monkeypatch)
+----------------------------------------------------------------------------------------------------
+Flags runtime mutation/rebinding of external objects, imported names, sys.modules, exec/eval, and patch calls.
+
+returncode: 0
+
+[monkeypatchdetect] No monkey-patches detected.
+
+[stderr]
+[monkeypatchdetect] Spidering imports from /grok/supergrok_bridge_cwv ...
+[monkeypatchdetect] Analysing 6 files ...
+
+----------------------------------------------------------------------------------------------------
+Raw SQL detector (raw-sql)
+----------------------------------------------------------------------------------------------------
+Flags raw sqlite/mysql connectors, cursor usage, and direct execute candidates.
+
+returncode: 0
+
+RAW SQL DETECTOR REPORT
+=======================
+
+Generated at: 2026-04-29T06:51:59
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+
+No raw SQL connector/cursor/execute candidates found in scanned app paths.
+
+----------------------------------------------------------------------------------------------------
+Recursion detector (recursion)
+----------------------------------------------------------------------------------------------------
+Flags direct self-recursion candidates in application code.
+
+returncode: 0
+
+RECURSION DETECTOR REPORT
+=========================
+
+Generated at: 2026-04-29T06:52:01
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+
+No direct self-recursion candidates found in scanned app paths.
+
+----------------------------------------------------------------------------------------------------
+Redundant code detector (redundant)
+----------------------------------------------------------------------------------------------------
+Flags runs of near-identical consecutive lines that should probably be loops/key-walks.
+
+returncode: 0
+
+REDUNDANT CODE DETECTOR REPORT
+==============================
+
+Generated at: 2026-04-29T06:52:04
+Root: /grok/supergrok_bridge_cwv
+Min run length: 3
+Findings: 0
+
+No repetitive line runs found.
+
+----------------------------------------------------------------------------------------------------
+Swallowed exceptions detector (swallowed-exceptions)
+----------------------------------------------------------------------------------------------------
+Flags except handlers that trace/log then silently continue, return null/false, or skip fault/warning surfaces.
+
+returncode: 0
+
+SWALLOWED EXCEPTIONS DETECTOR REPORT
+====================================
+
+Generated at: 2026-04-29T06:52:06
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+Severity counts: <none>
+Rule counts: <none>
+
+Rules:
+  SE001 empty except handler
+  SE002 pass/return/continue/break-only except handler
+  SE003 silent null/false return from except handler
+  SE004 control-flow exit from except handler without fault propagation
+  SE005 trace-and-swallow handler
+  SE006 catch-all handler that only logs/traces
+  SE007 catch-all handler lacks recognized fault/warning surface
+
+Findings:
+No swallowed-exception candidates found in scanned app paths.
+
+====================================================================================================
+SUMMARY
+====================================================================================================
+Combined report: /grok/supergrok_bridge_cwv/reports/claude_detectors_report_20260429_065153.txt
+Individual logs directory: /grok/supergrok_bridge_cwv/logs
+Infrastructure errors: 0
+Detector nonzero return codes mean findings were reported unless stderr says otherwise.

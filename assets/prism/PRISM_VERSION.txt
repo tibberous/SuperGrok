@@ -1,0 +1,3 @@
+PrismJS target: 1.30.0
+Local files are fallback stubs because the build sandbox could not fetch CDN JavaScript payloads.
+Run: python tools/fetch_prism.py

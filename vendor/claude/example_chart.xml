@@ -1,0 +1,6 @@
+<chart type="bar" theme="dark" width="900" height="500">
+    <title>Monthly Sales vs Revenue</title>
+    <xAxis type="category" data="Jan,Feb,Mar,Apr,May,Jun"/>
+    <series name="Sales"   type="bar"  data="10,20,30,25,35,40"/>
+    <series name="Revenue" type="line" data="100,150,200,175,220,260" smooth="true"/>
+</chart>

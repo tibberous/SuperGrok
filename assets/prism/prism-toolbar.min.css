@@ -1,0 +1,2 @@
+/* Prism toolbar fallback. */
+div.code-toolbar{position:relative}div.code-toolbar>.toolbar{position:absolute;top:.3em;right:.2em;opacity:.75}

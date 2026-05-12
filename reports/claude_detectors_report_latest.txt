@@ -1,0 +1,31 @@
+CLAUDE / FLATLINE DETECTORS COMBINED REPORT
+===========================================
+
+Generated at: 2026-05-05T13:31:49
+Root: /grok
+Non-vendor Python files visible: 6
+Selected detectors: comport
+
+[comport] exit=0 report=logs/comport.txt findings=0 files_scanned=4
+-------------------------------------------------------------------
+[detector:comport] command: /opt/pyvenv/bin/python3 /grok/vendor/claude/nonconformdetector.py --root /grok --output /grok/logs/comport.txt --no-prefix-check --no-symbol-check /grok/start.py /grok/supergrok_bridge
+NONCONFORMANCE DETECTOR REPORT
+==============================
+
+Generated at: 2026-05-05T13:31:52
+Root: /grok
+Files scanned: 4
+pyphen available: True
+Prefix pollution findings: 0
+Banned construct findings: 0
+Missing required symbols: 0
+Total findings: 0
+
+No nonconformances found.
+
+
+[detector:comport] parsed findings=0 files_scanned=4
+
+SUMMARY
+=======
+comport: exit=0 CLEAN findings=0 files_scanned=4 report=logs/comport.txt

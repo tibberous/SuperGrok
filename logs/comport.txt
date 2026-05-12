@@ -1,0 +1,13 @@
+NONCONFORMANCE DETECTOR REPORT
+==============================
+
+Generated at: 2026-05-05T13:31:52
+Root: /grok
+Files scanned: 4
+pyphen available: True
+Prefix pollution findings: 0
+Banned construct findings: 0
+Missing required symbols: 0
+Total findings: 0
+
+No nonconformances found.

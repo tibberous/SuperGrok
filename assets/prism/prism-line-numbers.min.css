@@ -1,0 +1,2 @@
+/* Prism line-numbers fallback. */
+pre.line-numbers{position:relative;padding-left:3.8em;counter-reset:linenumber}pre.line-numbers>code{position:relative;white-space:inherit}

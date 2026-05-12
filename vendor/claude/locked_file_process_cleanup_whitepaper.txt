@@ -1,0 +1,288 @@
+Dear ChatGPT CodeBot,
+
+Trent hit a Windows relaunch bug in FlopCoin that is important enough to fix once and then reuse across TrioDesktop, Prompt, PyEncoder, 247ch.at deploy tooling, and every future auto-deploy watcher.
+
+The symptom
+===========
+
+The watcher was stuck in a loop like this:
+
+    ERROR: System.IO.IOException: The process cannot access the file
+    'C:\flop_client\.auto-deploy-child.stdout.log' because it is being used by another process.
+    At C:\flop_client\auto.ps1:558 char:5
+        Set-Content -LiteralPath $StdoutLogPath -Value $null -Encoding UTF8
+    Stack: at Reset-ChildLogFiles, C:\flop_client\auto.ps1: line 558
+           at Start-ChildProcess, C:\flop_client\auto.ps1: line 572
+
+The process list showed old Flop client children still alive:
+
+    python.exe C:\flop_client\client\start.py --debug --server-url http://127.0.0.1:8765
+    python.exe C:\flop_client\client\FLOPT_ping_responder.py --host 0.0.0.0 ...
+
+So the watcher was trying to relaunch, but an older child/debugger/ping-responder chain was still running and Windows still considered the redirected stdout file in use. The new launch never reached the app. It died while trying to reset a log file.
+
+Root cause
+==========
+
+This is a classic Windows process/log-handle lifecycle bug:
+
+1. PowerShell Start-Process launches a child and redirects stdout/stderr to fixed filenames.
+2. The child process or one of its descendants keeps running.
+3. The next watcher pass tries to use Set-Content to truncate the same fixed stdout/stderr file.
+4. Windows refuses because another process still has a file handle open.
+5. The watcher catches/logs the IOException but loops into the same failure again.
+6. The app appears “broken” even though the real blocker is stale process ownership and a locked redirected log file.
+
+Microsoft's Start-Process documentation describes Start-Process as starting local processes and includes redirection parameters for stdout/stderr. Microsoft's Set-Content documentation says Set-Content replaces existing file content. Those two ideas collide when the target file is still locked by an earlier redirected child process. Microsoft also documents Stop-Process as stopping processes by name or PID on the local computer, and taskkill as ending tasks by PID or image name with /T and /F options for child-tree/force cleanup.
+
+References:
+- Start-Process: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process
+- Set-Content: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/set-content
+- Stop-Process: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/stop-process
+- taskkill: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/taskkill
+
+Design rule
+===========
+
+Do not relaunch a GUI/debugger app by reusing static redirected stdout/stderr paths and hoping the previous process exited.
+
+A robust relaunch flow must do three things:
+
+1. Use unique stdout/stderr log files per launch.
+2. Dispose process objects after stopping children.
+3. Before launching a new client, discover stale children by command line and kill them by PID using taskkill /T /F.
+
+The important part is “by command line,” not by process name. Killing every python.exe is dangerous. Killing every node.exe is dangerous. The cleanup must target only processes whose CommandLine contains the project root plus known app entrypoints, such as:
+
+    C:\flop_client\client\start.py
+    C:\flop_client\client\main.py
+    C:\flop_client\client\trio.py
+    C:\flop_client\client\FlopClient.py
+    C:\flop_client\client\flop_client.py
+    C:\flop_client\client\FLOPT_ping_responder.py
+
+Recommended PowerShell watcher fix
+==================================
+
+Add this to auto.ps1 and call Stop-StaleFlopClientProcesses immediately before launching the child:
+
+    function Stop-StaleFlopClientProcesses {
+        try {
+            $rootText = [string]$Root
+            $rootForward = ($rootText -replace '\\','/')
+            $needles = @(
+                'client/start.py',
+                'client/main.py',
+                'client/trio.py',
+                'client/FlopClient.py',
+                'client/flop_client.py',
+                'client/FLOPT_ping_responder.py'
+            )
+            $currentPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
+            $matches = @(Get-CimInstance Win32_Process | Where-Object {
+                $cmd = [string]$_.CommandLine
+                if ([string]::IsNullOrWhiteSpace($cmd)) { return $false }
+                if ([int]$_.ProcessId -eq [int]$currentPid) { return $false }
+                $normalized = $cmd -replace '\\','/'
+                foreach ($needle in $needles) {
+                    if ($normalized.IndexOf(($rootForward.TrimEnd('/') + '/' + $needle), [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        return $true
+                    }
+                }
+                return $false
+            })
+            foreach ($proc in $matches) {
+                Write-Log "STALE-CLIENT:FOUND pid=$($proc.ProcessId) name=$($proc.Name) command=$($proc.CommandLine)"
+                try {
+                    & taskkill.exe /PID ([string]$proc.ProcessId) /T /F 2>&1 | ForEach-Object { Write-Log "STALE-CLIENT:TASKKILL $_" }
+                } catch {
+                    Write-Log "WARN: STALE-CLIENT taskkill failed pid=$($proc.ProcessId). $(Format-ExceptionDetail $_)"
+                }
+            }
+            if ($matches.Count -eq 0) {
+                Write-Log "STALE-CLIENT:NONE"
+            } else {
+                Write-Log "STALE-CLIENT:SUMMARY found=$($matches.Count)"
+                Start-Sleep -Milliseconds 500
+            }
+        } catch {
+            Write-Log "WARN: stale Flop client cleanup failed. $(Format-ExceptionDetail $_)"
+        }
+    }
+
+Then make Start-ChildProcess call it before log setup:
+
+    function Start-ChildProcess {
+        param($TargetFile)
+
+        $pythonCommand = Get-PythonCommand
+        $allArgs = @()
+        $allArgs += $pythonCommand.PrefixArgs
+        $allArgs += @($TargetFile.FullName)
+        $allArgs += Split-AppArgsFromEnvironment
+        $argumentString = Format-ArgumentString -Arguments $allArgs
+
+        Stop-StaleFlopClientProcesses
+        Reset-ChildLogFiles
+
+        Write-Log "Launching: $($pythonCommand.FilePath) $argumentString"
+        Write-Log "Working directory: $($TargetFile.DirectoryName)"
+
+        return Start-Process -FilePath $pythonCommand.FilePath `
+                             -ArgumentList $argumentString `
+                             -WorkingDirectory $TargetFile.DirectoryName `
+                             -RedirectStandardOutput $StdoutLogPath `
+                             -RedirectStandardError $StderrLogPath `
+                             -PassThru
+    }
+
+Recommended per-launch log fix
+==============================
+
+Do not write to the same .auto-deploy-child.stdout.log forever. Create fresh files for every launch:
+
+    function New-ChildLogSession {
+        $Script:ChildLogRunCounter = [int]$Script:ChildLogRunCounter + 1
+        $stamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+        $suffix = "{0}_{1}" -f $stamp, $Script:ChildLogRunCounter
+        $Script:StdoutLogPath = Join-Path $Root (".auto-deploy-child.{0}.stdout.log" -f $suffix)
+        $Script:StderrLogPath = Join-Path $Root (".auto-deploy-child.{0}.stderr.log" -f $suffix)
+
+        foreach ($path in @($Script:StdoutLogPath, $Script:StderrLogPath)) {
+            try {
+                $parent = Split-Path -Parent $path
+                if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+                    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                }
+                New-Item -ItemType File -Path $path -Force | Out-Null
+            } catch {
+                Write-Log "WARN: could not pre-create child log '$path'. $(Format-ExceptionDetail $_)"
+            }
+        }
+    }
+
+    function Reset-ChildLogFiles {
+        New-ChildLogSession
+    }
+
+Recommended Python/root start.py fix
+====================================
+
+The root Python launcher should also perform the stale-client cleanup before it starts the GUI client. This protects launches that bypass auto.ps1 and launches where the watcher itself is fixed but an old ping responder is still alive.
+
+Sample Python code:
+
+    STALE_CLIENT_PROCESS_MATCHES = (
+        'client\\start.py',
+        'client\\main.py',
+        'client\\trio.py',
+        'client\\FlopClient.py',
+        'client\\flop_client.py',
+        'client\\FLOPT_ping_responder.py',
+        'client/start.py',
+        'client/main.py',
+        'client/trio.py',
+        'client/FlopClient.py',
+        'client/flop_client.py',
+        'client/FLOPT_ping_responder.py',
+    )
+
+    def findStaleFlopClientProcesses(root: Path) -> list[dict[str, Any]]:
+        if os.name != 'nt':
+            return []
+        root_text = str(Path(root).resolve())
+        script = """
+        $ErrorActionPreference = 'SilentlyContinue'
+        $Root = '__ROOT__'
+        $CurrentPid = __PID__
+        $RootForward = ($Root -replace '\\\\','/')
+        $Needles = @('__NEEDLES__')
+        $matches = @()
+        Get-CimInstance Win32_Process | ForEach-Object {
+          $cmd = [string]$_.CommandLine
+          if ([string]::IsNullOrWhiteSpace($cmd)) { return }
+          if ([int]$_.ProcessId -eq [int]$CurrentPid) { return }
+          $normalized = $cmd -replace '\\\\','/'
+          $hit = $false
+          foreach ($needle in $Needles) {
+            $n = ([string]$needle) -replace '\\\\','/'
+            if ($normalized.IndexOf(($RootForward.TrimEnd('/') + '/' + $n), [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true; break }
+          }
+          if ($hit) { $matches += [pscustomobject]@{ ProcessId = [int]$_.ProcessId; Name = [string]$_.Name; CommandLine = $cmd } }
+        }
+        $matches | ConvertTo-Json -Compress -Depth 3
+        """
+        # Fill placeholders safely in real code; do not string-concatenate untrusted paths.
+
+    def killStaleFlopClientProcesses(root: Path) -> int:
+        rows = findStaleFlopClientProcesses(root)
+        killed = 0
+        for row in rows:
+            pid = int(row.get('ProcessId') or 0)
+            if pid <= 0 or pid == os.getpid():
+                continue
+            print(f'STALE-CLIENT:FOUND pid={pid} name={row.get("Name")} command={row.get("CommandLine")}')
+            completed = subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if completed.returncode == 0:
+                killed += 1
+        print(f'STALE-CLIENT:SUMMARY found={len(rows)} killed={killed}')
+        return killed
+
+Where to call it
+================
+
+Call stale cleanup right before any path that starts the client GUI or its ping responder:
+
+    if not is_worker and not args.no_stale_client_kill:
+        should_launch_client = bool(
+            args.launch_client_only
+            or args.deploy_server
+            or (not args.push_only and not args.no_server_start and not args.no_client_start)
+        )
+        if should_launch_client:
+            killStaleFlopClientProcesses(root)
+
+Also add a bypass flag:
+
+    parser.add_argument('--no-stale-client-kill', action='store_true',
+        help='do not taskkill old Flop client/debugger/ping-responder children before launching')
+
+What not to do
+==============
+
+Do not kill every python.exe. The user may have many codebots, model tools, local servers, and helper scripts running.
+
+Do not kill by process name alone. Use Win32_Process.CommandLine and require the project root plus a known entrypoint.
+
+Do not keep truncating static redirected files during relaunch. Unique per-launch files are safer and preserve forensic logs.
+
+Do not hide this cleanup. Print clear trace lines:
+
+    STALE-CLIENT:FOUND pid=39844 name=python.exe command=...
+    STALE-CLIENT:TASKKILL SUCCESS: The process with PID 39844 has been terminated.
+    STALE-CLIENT:SUMMARY found=2 killed=2
+
+Checklist for other projects
+============================
+
+For every Windows auto-runner / deploy watcher:
+
+[ ] Use per-launch stdout/stderr log names.
+[ ] Tail logs with FileShare.ReadWrite.
+[ ] Dispose process objects after stopping children.
+[ ] Add a stale-process discovery function that filters by project root + known entrypoints.
+[ ] Use taskkill /PID <pid> /T /F for stale process trees.
+[ ] Never kill all python.exe, node.exe, powershell.exe, or pwsh.exe.
+[ ] Add a bypass flag for special debugging sessions.
+[ ] Emit trace lines before and after cleanup.
+[ ] Keep the root start.py and watcher script both hardened, because either may be the first live code path.
+
+Friendly summary
+================
+
+This was not a mysterious GUI bug. The relaunch pipeline was jammed by a stale Windows process tree and a reused redirected stdout file. The durable fix is to stop treating logs as reusable state and stop assuming the last child died cleanly. Every relaunch should create new log files, search for stale project-owned children by CommandLine, kill only those exact PIDs with taskkill /T /F, then launch fresh.
+
+Once this pattern is added to the shared launcher/watchers, the same bug class should stop eating TrioDesktop, Prompt, PyEncoder, FlopCoin, and future projects.
+
+Best,
+A codebot trying very hard not to leave haunted processes behind

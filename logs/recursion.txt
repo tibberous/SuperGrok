@@ -1,0 +1,9 @@
+RECURSION DETECTOR REPORT
+=========================
+
+Generated at: 2026-04-29T18:49:11
+Root: /grok/supergrok_bridge_cwv
+Files scanned: 6
+Findings: 0
+
+No direct self-recursion candidates found in scanned app paths.

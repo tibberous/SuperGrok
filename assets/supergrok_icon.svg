@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SuperGrok bridge icon. 64×64 viewBox; render OK at 16/24/32/64/256.
+  Motif: a black rounded square (terminal/screen) with a glowing orange
+  bridge "loop" between two endpoints — left dot = client, right dot = LLM
+  provider. Center spark = the live session. The whole thing reads at
+  16×16 because it's silhouette-first; details only resolve at larger sizes.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1a1a"/>
+      <stop offset="1" stop-color="#0a0a0a"/>
+    </linearGradient>
+    <linearGradient id="bridge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"   stop-color="#b83c00"/>
+      <stop offset="0.5" stop-color="#ff7a1a"/>
+      <stop offset="1"   stop-color="#e8621a"/>
+    </linearGradient>
+    <radialGradient id="spark" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0"   stop-color="#fff7e0" stop-opacity="1"/>
+      <stop offset="0.45" stop-color="#ffb060" stop-opacity="0.85"/>
+      <stop offset="1"   stop-color="#ff7a1a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- frame -->
+  <rect x="2" y="2" width="60" height="60" rx="10" ry="10"
+        fill="url(#bg)" stroke="#3a1a00" stroke-width="2"/>
+
+  <!-- bridge arc connecting the two endpoints -->
+  <path d="M 14 38 Q 32 12 50 38"
+        fill="none"
+        stroke="url(#bridge)"
+        stroke-width="5"
+        stroke-linecap="round"/>
+
+  <!-- left endpoint (client) -->
+  <circle cx="14" cy="38" r="5" fill="#ff7a1a" stroke="#0a0a0a" stroke-width="1.5"/>
+  <!-- right endpoint (provider) -->
+  <circle cx="50" cy="38" r="5" fill="#ff7a1a" stroke="#0a0a0a" stroke-width="1.5"/>
+
+  <!-- center spark = active session -->
+  <circle cx="32" cy="20" r="9" fill="url(#spark)"/>
+  <circle cx="32" cy="20" r="3" fill="#fff5d8"/>
+
+  <!-- subtle baseline so the icon reads grounded at small sizes -->
+  <line x1="10" y1="50" x2="54" y2="50" stroke="#4a1f00" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

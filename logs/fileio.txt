@@ -1,0 +1,8 @@
+FILE I/O DETECTOR REPORT
+========================
+
+Generated at: 2026-04-29T18:49:12
+Root: /grok/supergrok_bridge_cwv
+Findings: 0
+
+No raw file I/O bypasses found.

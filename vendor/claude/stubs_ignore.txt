@@ -1,0 +1,51 @@
+# Qt headless shims — intentional no-ops when Qt is unavailable
+cutiepy.py:__init__
+cutiepy.py:connect
+cutiepy.py:emit
+cutiepy.py:start
+cutiepy.py:stop
+cutiepy.py:instance
+cutiepy.py:activewindow
+cutiepy.headless.py:__init__
+cutiepy.headless.py:connect
+cutiepy.headless.py:emit
+cutiepy.headless.py:start
+cutiepy.headless.py:stop
+cutiepy.headless.py:instance
+cutiepy.headless.py:activewindow
+cutiepy.headless.py:setwidgetresizable
+cutiepy.headless.py:sethorizontalscrollbarpolicy
+cutiepy.headless.py:setverticalscrollbarpolicy
+
+# Lifecycle Qt shims
+_lifecycle.py:__init__
+_lifecycle.py:connect
+_lifecycle.py:emit
+_lifecycle.py:start
+_lifecycle.py:stop
+_lifecycle.py:eventhandler
+_lifecycle.py:shouldsuppressmodalsound
+_lifecycle.py:activechatview
+_lifecycle.py:_returnnone
+_lifecycle.py:play
+_lifecycle.py:clearcache
+_lifecycle.py:isrecording
+_lifecycle.py:getactive
+_lifecycle.py:availablesoundfiles
+_lifecycle.py:ensure
+_lifecycle.py:createtables
+_lifecycle.py:bootstrap
+_lifecycle.py:ensureschema
+_lifecycle.py:__bool__
+
+# Localization fallbacks — real implementations live in cutiepy.py
+_localization.py:webengineAvailable
+_localization.py:disablewebengine
+_localization.py:applymanageddisplaybackground
+_localization.py:stripembeddedlocalizationpayloads
+
+# Theme fallbacks — CSS generation is optional
+_themes.py:generatecss
+_themes.py:storedHTMLwidget
+_themes.py:getsvgmarkup
+_themes.py:panelimagekey

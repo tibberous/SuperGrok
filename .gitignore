@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.env
+.venv/
+venv/
+build/
+dist/
+*.spec
+*.log
+.local_profile/
+.supergrok_profile/
+.DS_Store
+Thumbs.db
+
+# Runtime data — browser profiles, sqlite DBs, traffic logs (313 MB).
+# Each user re-bootstraps these on first launch.
+data/
+*.sqlite3
+*.sqlite3-journal
+debug.log
+session.log
+
+# Packaged delivery zips
+*.zip
