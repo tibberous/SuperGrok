@@ -869,6 +869,7 @@ def buildParser() -> argparse.ArgumentParser:
     parser.add_argument("--ver", "--version", action="store_true", help=f"Print version ({APP_NAME} {APP_VERSION}) and exit.")
     parser.add_argument("--login", action="store_true", help="Open a stripped-down login-only window for the chosen --target (or --grok/--chatgpt/--gemini/--claude).")
     parser.add_argument("--probe-auth", action="store_true", help="Headless: load the chosen --target home URL, report logged-in/out state and minimum no-scroll login window size as JSON, then exit.")
+    parser.add_argument("--no-auto-login", action="store_true", help="For --chat: do not auto-pop the stripped login window when the bridge reports a logged-out state. Useful for CI / non-interactive contexts.")
     try:
         from gh_pipeline import addArgparseFlags as _addGhFlags
         _addGhFlags(parser)
@@ -1662,6 +1663,47 @@ def chatProviderLabelLocal(target: str) -> str:
     return "Grok"
 
 
+def _chatResponseLooksLoggedOut(response: dict[str, Any]) -> bool:
+    """Heuristic: did the bridge fail because the user isn't logged in?
+
+    Looks at the response error/hint text + any loginLikely / hardAuthLikely
+    flags the bridge surfaces from the page probe. Used to decide whether the
+    CLI should auto-pop the stripped login window and retry.
+    """
+    if not isinstance(response, dict):
+        return False
+    if response.get("loginLikely") or response.get("hardAuthLikely"):
+        return True
+    blob = " ".join(str(response.get(k) or "") for k in ("error", "hint", "reason", "lastProgress")).lower()
+    return any(token in blob for token in (
+        "login", "sign in", "signin", "auth", "not logged in", "logged out",
+        "captcha", "verification", "session expired", "access denied",
+        "accounts.x.ai", "auth.openai.com", "accounts.google.com",
+    ))
+
+
+def _runLoginBridgeAndWait(target: str, profileDir: str = "", debug: bool = False) -> int:
+    """Spawn `python start.py --login --target <target>` as a subprocess and wait.
+
+    User logs in interactively; the stripped login bridge auto-closes when the
+    JS auth probe says the page is no longer on an auth host. Returns the
+    subprocess exit code.
+    """
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--login", "--target", target]
+    if profileDir:
+        cmd.extend(["--profile-dir", profileDir])
+    if debug:
+        cmd.append("--debug")
+    if debug:
+        print(f"[bridge-client] auto-handoff: spawning login bridge for {target}: {' '.join(cmd)}", file=sys.stderr, flush=True)
+    try:
+        proc = subprocess.run(cmd, timeout=600)  # lifecycle-bypass-ok: interactive login window
+        return int(proc.returncode or 0)
+    except subprocess.TimeoutExpired:
+        print(f"[bridge-client] login bridge for {target} did not close within 10 minutes; giving up", file=sys.stderr, flush=True)
+        return 124
+
+
 def runChatCommand(args: argparse.Namespace) -> int:
     try:
         chat = parseChatArgs(args.chat)
@@ -1785,6 +1827,23 @@ def runChatCommand(args: argparse.Namespace) -> int:
         except Exception as error:
             print(f"[WARN:save-file] {type(error).__name__}: {error}", file=sys.stderr, flush=True)
         return 0
+    # Auto-handoff: if the failure looks like a logged-out state, pop the
+    # stripped login bridge for the same target, wait for the user to finish
+    # logging in, then retry the chat exactly once. Skip if --no-auto-login.
+    if (not getattr(args, "no_auto_login", False)
+            and not getattr(args, "_auto_login_retry", False)
+            and _chatResponseLooksLoggedOut(response)):
+        target = normalizeChatTarget(getattr(args, "chat_target", "") or chat.get("target") or "grok")
+        print(f"[bridge-client] {target} session looks logged out — opening login window…", file=sys.stderr, flush=True)
+        loginCode = _runLoginBridgeAndWait(target, profileDir=getattr(args, "profile_dir", "") or "", debug=bool(args.debug))
+        chatDebugTrace(args, "auto-handoff login bridge closed", target=target, exitCode=loginCode)
+        if loginCode == 0:
+            # One-shot retry. Set sentinel so we don't loop on the next pass.
+            setattr(args, "_auto_login_retry", True)
+            print(f"[bridge-client] retrying chat after login…", file=sys.stderr, flush=True)
+            return runChatCommand(args)
+        print(f"[bridge-client] login bridge exited {loginCode}; not retrying", file=sys.stderr, flush=True)
+
     try:
         if response.get("shownForRepair") or "surface" in str(response.get("error", "")).lower() or "login" in str(response.get("hint", "")).lower():
             bridgeRequest({"action": "show", "reason": str(response.get("error") or "chat failed")}, port=int(args.bridge_port or BRIDGE_SERVICE_PORT), timeout=5)
